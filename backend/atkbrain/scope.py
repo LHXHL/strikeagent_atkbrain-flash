@@ -58,6 +58,14 @@ _FILE_LIKE_TLD = frozenset({
     "ico", "woff", "woff2", "ttf", "eot", "pdf", "zip", "gz", "tgz", "md",
     "yml", "yaml", "toml", "lock", "log", "php", "asp", "aspx", "jsp",
 })
+# 两位字母按国家后缀放行。更长的必须是常见公共后缀，避免 json.load / sys.stdin 被当成主机。
+_PUBLIC_GTLDS = frozenset({
+    "com", "net", "org", "edu", "gov", "mil", "int", "app", "dev", "cloud",
+    "info", "biz", "xyz", "top", "site", "online", "store", "tech", "pro",
+    "vip", "work", "live", "team", "group", "network", "systems", "host",
+    "studio", "blog", "page", "shop", "news", "media", "link", "space",
+    "io", "ai", "co",
+})
 
 
 def _norm_host(host: str) -> str:
@@ -248,6 +256,8 @@ def is_plausible_dns_host(host: str) -> bool:
         return False
     tld = h.rsplit(".", 1)[-1]
     if not tld.isalpha() or tld in _FILE_LIKE_TLD or len(tld) < 2:
+        return False
+    if len(tld) != 2 and tld not in _PUBLIC_GTLDS:
         return False
     labels = [p for p in h.split(".") if p]
     if len(labels) < 2:
@@ -961,8 +971,57 @@ def scan_network_forbidden_reason(
     )
 
 
+# 政府 / 教育 / 军队 / 学术网。写进 Scope 也不能打，避免工具被拿去打这类域名。
+_PROTECTED_TLDS = frozenset({"gov", "edu", "mil", "int"})
+_PROTECTED_PUBLIC_SLD = frozenset({
+    "gov", "edu", "mil", "ac", "gob", "gouv", "govt",
+})
+
+
+def sensitive_domain_reason(host: str) -> str | None:
+    """命中政府、教育、军队或学术后缀则返回拒绝原因。IP 无法判断，不在这里拦。"""
+    h = _norm_host(host).split("/")[0]
+    if h.count(":") == 1:
+        name, port = h.split(":")
+        if port.isdigit():
+            h = name
+    if not h or _IP_RE.match(h):
+        return None
+    try:
+        ipaddress.ip_address(h)
+        return None
+    except ValueError:
+        pass
+    labels = [p for p in h.split(".") if p]
+    if len(labels) < 2:
+        return None
+    tld, sld = labels[-1], labels[-2]
+    protected = tld in _PROTECTED_TLDS or (
+        len(tld) == 2 and (sld in _PROTECTED_PUBLIC_SLD or sld == "go")
+    )
+    if not protected:
+        return None
+    return (
+        f"禁止攻击政府、教育、军队或学术网域名：{h}。"
+        "这类后缀（.gov/.edu/.mil/.int，以及 .gov.cn/.edu.cn/.ac.uk/.go.jp 等）"
+        "不能作为项目目标，也不能连接。登记进作业范围也不能例外。"
+    )
+
+
+def sensitive_attack_reason(host: str) -> str | None:
+    """连接出口用。公开漏洞文档站的精确主机名只允许查阅，不能当项目目标。"""
+    h = _norm_host(host).split("/")[0]
+    if h.count(":") == 1:
+        name, port = h.split(":")
+        if port.isdigit():
+            h = name
+    if h in _PUBLIC_DOC_HOSTS:
+        return None
+    return sensitive_domain_reason(h)
+
+
 def forbidden_project_target_reason(host: str) -> str | None:
-    """项目主目标是否禁止：回环、本机网卡、物机网关。普通内网 IP 不禁。"""
+    """项目主目标是否禁止：回环、本机网卡、物机网关、政府/教育/军队/学术域名。普通内网 IP 不禁。"""
     h = _norm_host(host)
     if not h:
         return "目标不能为空"
@@ -970,6 +1029,9 @@ def forbidden_project_target_reason(host: str) -> str | None:
         return f"禁止以回环/本机别名作为项目目标：{h}"
     if is_attacker_identity(h):
         return f"禁止以本机/物机（攻击机网卡或默认网关）作为项目目标：{h}"
+    why = sensitive_domain_reason(h)
+    if why:
+        return why
     return None
 
 

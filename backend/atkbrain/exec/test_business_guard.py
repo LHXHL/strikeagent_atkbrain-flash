@@ -5,7 +5,8 @@ import unittest
 
 from ..agents.context import AgentContext
 from ..exec.guard import Guard, target_destructive_reason
-from ..scope import Scope
+from ..projects import assert_safe_project_target
+from ..scope import Scope, sensitive_attack_reason, sensitive_domain_reason
 
 
 def _scope() -> Scope:
@@ -132,6 +133,57 @@ class HttpRequestHttpsTests(unittest.IsolatedAsyncioTestCase):
             objective="src",
         )
         self.assertIsNone(why)
+
+
+class SensitiveDomainTests(unittest.TestCase):
+    def test_protected_suffixes(self) -> None:
+        for host in (
+            "www.mit.edu", "library.edu.cn", "agency.gov", "ministry.gov.cn",
+            "cam.ac.uk", "www.kantei.go.jp", "army.mil", "school.edu.au",
+        ):
+            self.assertIsNotNone(sensitive_domain_reason(host), host)
+
+    def test_ordinary_names_pass(self) -> None:
+        for host in ("example.com", "education.com", "governor.io", "go.com", "gov.example.com"):
+            self.assertIsNone(sensitive_domain_reason(host), host)
+
+    def test_doc_host_can_be_read_but_not_hunted(self) -> None:
+        self.assertIsNotNone(sensitive_domain_reason("nvd.nist.gov"))
+        self.assertIsNone(sensitive_attack_reason("nvd.nist.gov"))
+        with self.assertRaises(ValueError):
+            assert_safe_project_target("https://www.mit.edu/admissions")
+
+    def test_scope_cannot_override(self) -> None:
+        g = Guard(Scope(targets=["www.mit.edu"], mode="strict"), objective="src")
+        d = g.check_command("curl -s https://www.mit.edu/")
+        self.assertFalse(d.allow, d.reason)
+        g_ctf = Guard(Scope(targets=["agency.gov"], mode="strict"), objective="flag")
+        d2 = g_ctf.check_command("curl -s https://agency.gov/")
+        self.assertFalse(d2.allow, d2.reason)
+
+    def test_ssrf_payload_to_edu_blocked(self) -> None:
+        g = Guard(Scope(targets=["example.com"], mode="strict"), objective="src")
+        d = g.check_command(
+            "curl -s https://example.com/fetch -d 'url=http://library.edu.cn/'"
+        )
+        self.assertFalse(d.allow, d.reason)
+
+
+class RedteamTightenTests(unittest.TestCase):
+    def test_hydra_blocked_on_src_and_redteam(self) -> None:
+        cmd = "hydra -L users.txt -P pass.txt https://example.com/login"
+        self.assertIsNotNone(target_destructive_reason(cmd, objective="src"))
+        self.assertIsNotNone(target_destructive_reason(cmd, objective="getshell"))
+        self.assertIsNone(target_destructive_reason(cmd, objective="flag"))
+
+    def test_persistence_blocked(self) -> None:
+        self.assertIsNotNone(target_destructive_reason(
+            "echo x >> /root/.ssh/authorized_keys", objective="src",
+        ))
+        self.assertIsNotNone(target_destructive_reason(
+            "crontab -l", objective="redteam",
+        ))
+        self.assertIsNone(target_destructive_reason("crontab -l", objective="flag"))
 
 
 if __name__ == "__main__":

@@ -169,6 +169,34 @@ def _set_job(job: dict, percent: int, message: str, status: str = "running") -> 
     _persist_job(job)
 
 
+def enrich_from_facts(data: dict) -> dict:
+    """Pi 没交回可用 JSON 时，用已入库的漏洞页字段填槽，报告仍然生成。"""
+    project = data.get("project") or {}
+    name = str(project.get("name") or "渗透测试")
+    target = str(project.get("target") or "")
+    findings: dict = {}
+    for i, f in enumerate(data.get("findings") or [], 1):
+        if not isinstance(f, dict):
+            continue
+        sid = f"vuln-{i:02d}"
+        repro = str(f.get("report_repro") or f.get("manual_repro") or "").strip() or "未采集"
+        fix = str(f.get("report_fix") or f.get("remediation") or "").strip() or "未采集"
+        findings[sid] = {
+            "intro": str(f.get("report_summary") or f.get("description") or "未采集"),
+            "impact": str(f.get("report_impact") or f.get("impact_detail") or ""),
+            "steps": [repro],
+            "fixes_now": [fix],
+            "verify": str(f.get("report_rating") or ""),
+        }
+    return {
+        "title_line": name,
+        "title_accent": target,
+        "sub": target or name,
+        "summary_overview": f"<p>{name}</p>",
+        "findings": findings,
+    }
+
+
 def _enrich_usable(enrich: dict | None) -> bool:
     if not isinstance(enrich, dict) or not enrich:
         return False
@@ -344,14 +372,12 @@ async def run_export_job(job: dict) -> None:
             if not _enrich_usable(enrich):
                 if not claude_err:
                     claude_err = msg("job_bad_json", lang=loc)
+                enrich = enrich_from_facts(data)
                 job["claude"] = False
                 job["claude_error"] = claude_err
-                job["error"] = claude_err
-                _set_job(job, 58, msg("job_pi_fail", lang=loc, err=claude_err[:160]), status="error")
-                await _notify_export(pid, "error", claude_err[:200])
-                return
-            job["claude"] = True
-            job["claude_error"] = None
+            else:
+                job["claude"] = True
+                job["claude_error"] = None
             job["pi_role"] = EXPORT_ROLE
             _set_job(job, 62, msg("job_shell", lang=loc))
             html_doc = assemble_deliverable(data, enrich=enrich, lang=loc)

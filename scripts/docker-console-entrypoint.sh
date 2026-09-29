@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# 控制台镜像入口：与本机 systemd 同口径（Pi + Yak MCP/MITM + 前端 :2334）。
+# 控制台镜像入口：Pi + 前端 :2334。出口代理只走设置页导入的代理池。
 # 不是 TSecBench 托管模式，不会自行拉题开打。
 set -euo pipefail
 
@@ -32,10 +32,6 @@ fi
 
 if [[ -z "${DEEPSEEK_API_KEY:-}" ]]; then
   echo "[entrypoint] 警告: 未设置 DEEPSEEK_API_KEY（或 ANTHROPIC_AUTH_TOKEN）。控制台能开，猎面 Pi 不会就绪。" >&2
-fi
-
-if ! command -v yak >/dev/null 2>&1 && [[ ! -x /usr/local/bin/yak ]]; then
-  echo "[entrypoint] 警告: 镜像里没有 yak，顶栏会一直「Yakit 未就绪」。请用 Dockerfile.console 构建。" >&2
 fi
 
 /opt/atkbrain/venv/bin/python - <<'PY'

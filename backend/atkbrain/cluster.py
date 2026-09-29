@@ -803,14 +803,8 @@ async def _http_get_httpx_v4(url: str) -> dict | None:
     must = False
     try:
         from .proxy.pool import pool as _proxy_pool
-        from .proxy.yakit import prepare_egress, should_use_yakit
         must = bool(_proxy_pool.enabled)
-        if should_use_yakit("redteam"):
-            eg = await prepare_egress("redteam")
-            if eg.refuse:
-                return None
-            proxy = eg.proxy
-        elif must:
+        if must:
             proxy = _proxy_pool.pick()
             if not proxy:
                 return None

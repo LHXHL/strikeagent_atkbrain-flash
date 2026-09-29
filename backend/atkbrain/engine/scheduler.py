@@ -373,7 +373,7 @@ class RunManager:
             if loop is not None:
                 async def _nudge() -> None:
                     try:
-                        await agent.interrupt()  # type: ignore[misc]
+                        await agent.interrupt(halt=False)  # type: ignore[misc]
                     except Exception:
                         pass
                 loop.create_task(_nudge())

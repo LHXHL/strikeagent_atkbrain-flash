@@ -32,6 +32,12 @@ class OverlapReviewTests(unittest.TestCase):
         src = inspect.getsource(ProjectAgent.run_turn)
         self.assertIn("interrupt(halt=False)", src)
 
+    def test_turn_guard_does_not_halt_review(self) -> None:
+        from ..engine.loop import _run_turn_guarded
+
+        src = inspect.getsource(_run_turn_guarded)
+        self.assertIn("interrupt(halt=False)", src)
+
     def test_halt_still_closes_review(self) -> None:
         from ..agents.session import ProjectAgent
 

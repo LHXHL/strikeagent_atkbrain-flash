@@ -1,6 +1,7 @@
 import { useEffect, useState } from "react";
 import { useLocation } from "react-router-dom";
 import { api } from "../api";
+import { Modal } from "./Modal";
 import { isCtfProject } from "../projectStatus";
 import { useT } from "../i18n";
 
@@ -52,17 +53,10 @@ interface ProxyInfo {
   enabled: boolean;
   live: number;
   fetching: boolean;
+  custom_count?: number;
+  need_proxy?: boolean;
   exit_ip?: string | null;
   error?: string | null;
-}
-
-interface YakitInfo {
-  enabled: boolean;
-  tools_count?: number;
-  error?: string | null;
-  engine?: { ready?: boolean; label?: string; url?: string; error?: string | null };
-  cert?: { ready?: boolean; label?: string; error?: string | null; fingerprint?: string; expires_at?: string };
-  mitm?: { listening?: boolean; host?: string; port?: number; downstream?: string; verified?: boolean; exit_ip?: string | null };
 }
 
 function projectIdFromPath(pathname: string): string | null {
@@ -75,25 +69,22 @@ export function TopNav() {
   const location = useLocation();
   const [h, setH] = useState<Health | null>(null);
   const [px, setPx] = useState<ProxyInfo | null>(null);
-  const [yk, setYk] = useState<YakitInfo | null>(null);
+  const [needProxy, setNeedProxy] = useState(false);
   const [ctfView, setCtfView] = useState<boolean | null>(null);
 
   useEffect(() => {
     const load = () => api.health().then((r) => setH(r)).catch(() => {});
     load();
     const t = setInterval(load, 10000);
-    return () => clearInterval(t);
+    window.addEventListener("atkbrain-health", load);
+    return () => {
+      clearInterval(t);
+      window.removeEventListener("atkbrain-health", load);
+    };
   }, []);
 
   useEffect(() => {
     const load = () => api.proxyStatus().then((r) => setPx(r)).catch(() => {});
-    load();
-    const t = setInterval(load, 2000);
-    return () => clearInterval(t);
-  }, []);
-
-  useEffect(() => {
-    const load = () => api.yakitStatus().then((r) => setYk(r)).catch(() => {});
     load();
     const t = setInterval(load, 2000);
     return () => clearInterval(t);
@@ -135,20 +126,21 @@ export function TopNav() {
   const toggleProxy = async () => {
     if (ctfView) return;
     const next = !(px?.enabled);
+    if (next && !Number(px?.custom_count || 0)) {
+      setNeedProxy(true);
+      return;
+    }
     const r = await api.setProxyEnabled(next).catch(() => null);
-    if (r) setPx({
+    if (!r) return;
+    if (r.need_proxy) setNeedProxy(true);
+    setPx({
       enabled: !!r.enabled,
       live: Number(r.live || 0),
       fetching: !!r.fetching,
+      custom_count: Number(r.custom_count || 0),
       exit_ip: r.exit_ip,
+      error: r.error,
     });
-  };
-
-  const toggleYakit = async () => {
-    if (ctfView) return;
-    const next = !(yk?.enabled);
-    const r = await api.setYakitEnabled(next).catch(() => null);
-    if (r) setYk(r);
   };
 
   const cl = h?.claude;
@@ -159,12 +151,6 @@ export function TopNav() {
   const onProject = !!projectIdFromPath(location.pathname);
   const ctfLocked = ctfView === true;
   const srcProxyOn = !ctfLocked && ctfView !== null && !!px?.enabled;
-  const yakitOn = !ctfLocked && ctfView !== null && !!yk?.enabled;
-  const yakitLabel = ctfLocked
-    ? t("topnav.ctfNoMitm")
-    : (onProject && ctfView === null)
-      ? t("topnav.yakitWait")
-      : "Yakit";
   const proxyLabel = ctfLocked
     ? t("topnav.ctfDirect")
     : (onProject && ctfView === null)
@@ -230,51 +216,6 @@ export function TopNav() {
                 />
               )}
             </div>
-            <div
-              className="row status-control"
-              style={{ gap: 8 }}
-              title={
-                ctfLocked
-                  ? t("topnav.yakitCtf")
-                  : (yk?.error
-                    ? String(yk.error)
-                    : t("topnav.yakitHint"))
-              }
-            >
-              <button
-                type="button"
-                className={`proxy-switch${yakitOn ? " is-on" : ""}${ctfLocked ? " is-locked" : ""}`}
-                aria-pressed={yakitOn}
-                aria-disabled={ctfLocked}
-                disabled={ctfLocked}
-                onClick={() => { void toggleYakit(); }}
-              >
-                <span className="proxy-switch-knob" />
-              </button>
-              <span>{yakitLabel}</span>
-              <span
-                className="pulse-dot"
-                title={yk?.engine?.error || yk?.engine?.label || "Yakit"}
-                style={{ background: yk?.engine?.ready ? "var(--success)" : "var(--error)" }}
-              />
-              <span>{yk?.engine?.ready ? t("settings.yakitReady") : t("settings.yakitDown")}</span>
-              <span
-                className="pulse-dot"
-                title={yk?.cert?.error || yk?.cert?.label || t("topnav.cert")}
-                style={{ background: yk?.cert?.ready ? "var(--success)" : "var(--error)" }}
-              />
-              <span>{yk?.cert?.ready ? t("settings.certReady") : t("settings.certBad")}</span>
-              {yakitOn && (
-                <>
-                  <span
-                    className="pulse-dot"
-                    title={yk?.mitm?.verified ? t("topnav.mitmExit", { ip: yk?.mitm?.exit_ip || "" }) : (yk?.error || t("topnav.mitmUnverified"))}
-                    style={{ background: yk?.mitm?.verified ? "var(--success)" : "var(--error)" }}
-                  />
-                  <span>{yk?.mitm?.verified ? (yk?.mitm?.exit_ip ? t("topnav.exitOk", { ip: yk.mitm.exit_ip }) : t("topnav.exitVerified")) : t("topnav.exitNo")}</span>
-                </>
-              )}
-            </div>
             {h?.claude_sdk && (
               <div className="row status-control" style={{ gap: 6 }} title={t("topnav.piTitle")}>
                 <span className="pulse-dot" style={{ background: h.claude_sdk?.state === "unavailable" ? "var(--error)" : "var(--success)" }} />
@@ -290,6 +231,12 @@ export function TopNav() {
             )}
         </div>
       </div>
+      {needProxy && (
+        <Modal title={t("topnav.needProxyTitle")} onClose={() => setNeedProxy(false)}>
+          <p style={{ marginTop: 0 }}>{t("topnav.needProxy")}</p>
+          <button className="btn btn-primary" type="button" onClick={() => setNeedProxy(false)}>{t("common.close")}</button>
+        </Modal>
+      )}
     </div>
   );
 }

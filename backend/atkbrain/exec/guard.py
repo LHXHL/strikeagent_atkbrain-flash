@@ -21,6 +21,8 @@ from ..scope import (
     local_self_hosts,
     parse_scan_network,
     scan_network_forbidden_reason,
+    public_hosts_in_text,
+    sensitive_attack_reason,
     unauthorized_peer_endpoint,
     unauthorized_private_host,
     unauthorized_public_host,
@@ -251,6 +253,20 @@ _BIZ_RM_RE = re.compile(
     r"\brm\s+-rf\s+(?:/var/www|/usr/share/nginx|/opt/|/home/www)",
     re.I,
 )
+# 红队/SRC：口令喷洒会锁线上账号，也超出「证明漏洞」的授权。
+_SPRAY_TOOL_RE = re.compile(
+    r"(?:^|[\s;&|`(])(?:/usr/(?:s?bin)/)?(?:hydra|medusa|ncrack|patator)\b",
+    re.I,
+)
+# 红队/SRC：不在目标上留账号、计划任务或开机项。
+_PERSIST_RE = re.compile(
+    r"(?:^|[\s;&|`(])(?:crontab|useradd|adduser|schtasks)\b"
+    r"|\bauthorized_keys\b"
+    r"|\bnet\s+user\b"
+    r"|\bsystemctl\s+(?:enable|start)\b"
+    r"|/etc/rc\.local\b",
+    re.I,
+)
 
 # 超过 10 万行的词表：CTF 与红队一律拦截（目录/口令/子域/host/哈希）。
 _MEGA_WORDLIST_RE = re.compile(
@@ -318,6 +334,10 @@ def _looks_like_write_http(blob: str) -> bool:
 
 def _business_mutation_reason(blob: str) -> str | None:
     """红队/SRC：身份落地、资金提交、通知轰炸、高并发写、他人资料删改。"""
+    if _SPRAY_TOOL_RE.search(blob):
+        return "禁止口令喷洒（hydra/medusa/ncrack/patator）；会锁线上账号，也超出授权证明"
+    if _PERSIST_RE.search(blob):
+        return "禁止在目标上留账号、计划任务或开机项；只做当次可复现的证明"
     if _DOS_RE.search(blob):
         return "高并发写/压测工具会把业务打挂；最多对自己的测试对象做 2 路对照"
     if _BIZ_RM_RE.search(blob):
@@ -760,6 +780,11 @@ class Guard:
         for pat in _DESTRUCTIVE:
             if pat.search(cmd):
                 return GuardDecision(False, f"拦截破坏性命令：匹配 {pat.pattern}", "destructive")
+
+        for h in public_hosts_in_text(cmd):
+            why = sensitive_attack_reason(h)
+            if why:
+                return GuardDecision(False, f"拦截：{why}", "policy", hosts=[h])
 
         why = target_destructive_reason(cmd, objective=self.objective)
         if why:

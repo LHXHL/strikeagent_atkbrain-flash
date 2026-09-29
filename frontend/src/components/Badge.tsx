@@ -7,6 +7,11 @@ export function SeverityBadge({ severity }: { severity: string }) {
 export function VerifyBadge({ status }: { status?: string }) {
   const { t } = useT();
   const s = (status || "verified").toLowerCase();
+  if (s === "excluded") {
+    return (
+      <span className="kbd" style={{ fontSize: 11, color: "var(--warning, #d4a017)" }}>{t("badge.excluded")}</span>
+    );
+  }
   if (s === "rejected") {
     return (
       <span className="kbd" style={{ fontSize: 11, color: "var(--error)" }}>{t("badge.rejected")}</span>
@@ -35,8 +40,13 @@ const RT_RATING_KEY: Record<string, string> = {
   info: "badge.rtInfo",
 };
 
-export function SecondaryVerifyBadge({ done, reviewing }: { done?: boolean; reviewing?: boolean }) {
+export function SecondaryVerifyBadge({ done, reviewing, excluded }: { done?: boolean; reviewing?: boolean; excluded?: boolean }) {
   const { t } = useT();
+  if (excluded) {
+    return (
+      <span className="kbd" style={{ fontSize: 11, color: "var(--warning, #d4a017)" }}>{t("badge.excluded")}</span>
+    );
+  }
   if (done) {
     return (
       <span className="kbd" style={{ fontSize: 11, color: "var(--ok, #2a7)" }}>{t("badge.secondDone")}</span>

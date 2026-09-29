@@ -961,7 +961,7 @@ async def _run_turn_guarded(
             # 不限墙钟也不看 hang 时仍要能被人工打断：上面 slice_wait=2s 已轮询。
             continue
     try:
-        await agent.interrupt()
+        await agent.interrupt(halt=False)
     except Exception:
         pass
     task.cancel()
@@ -1365,9 +1365,15 @@ async def run_project_loop(manager: RunManager, project_id: str) -> None:
         try:
             _g0 = _g_boot if _g_boot is not None else await gstore.get_graph(project_id)
             last_node_count = int((_g0.get("stats") or {}).get("nodes") or 0)
+            last_finding_count = int((_g0.get("stats") or {}).get("findings") or 0)
         except Exception:
             last_node_count = 0
+            last_finding_count = 0
             _g0 = {"nodes": [], "edges": [], "findings": []}
+        try:
+            empty_rounds = max(0, int(hunt_state.get("empty_rounds") or 0))
+        except (TypeError, ValueError):
+            empty_rounds = 0
         try:
             from ..memory.achievements import detect_achievements
             from ..objective import objective_allows_flag, redteam_ultimate_reached
@@ -1540,6 +1546,8 @@ async def run_project_loop(manager: RunManager, project_id: str) -> None:
         else:
             budget = 0
         max_turns = hunt_max_turns(objective, is_benchmark=is_benchmark)
+        if not ctf_clocks:
+            max_turns = 0
 
         async def _save_hunt(done_turn: int) -> None:
             await _persist_hunt_clock(project_id, rid, snapshot_hunt(
@@ -1551,6 +1559,7 @@ async def run_project_loop(manager: RunManager, project_id: str) -> None:
                 ),
                 idle_sec=max(0.0, _time.monotonic() - last_node_growth_mono),
                 idle_plans=idle_plans,
+                empty_rounds=empty_rounds,
             ))
 
         elapsed0 = _time.monotonic() - t_start
@@ -1712,20 +1721,8 @@ async def run_project_loop(manager: RunManager, project_id: str) -> None:
                             and entry_rebind_attempts < 2
                         ):
                             supervisor.want_rebind = True
-                    elif redteam_yield_sec > 0 and down_for >= redteam_yield_sec:
-                        mins = max(1, int(down_for // 60))
-                        await emit(
-                            project_id, "log",
-                            {"level": "warn",
-                             "message": (
-                                 f"入口 {ehost} 已连续约 {mins} 分钟不可达"
-                                 f"（已探 80/443/登记端口），暂停本项目让出并发槽。"
-                                 f"不换目标；站点恢复后可再启动。"
-                             )},
-                            run_id=rid,
-                        )
-                        pause_reason = "entry_dead"
-                        break
+                    elif not ctf_clocks:
+                        pass
             else:
                 entry_down_since = None
             just_rebound = False
@@ -1741,7 +1738,7 @@ async def run_project_loop(manager: RunManager, project_id: str) -> None:
                 nh = str(target or "").split(":")[0]
                 if nh and await _tcp_alive(nh, _entry_port(project)):
                     entry_down_since = None
-                if supervisor.halt_env:
+                if supervisor.halt_env and is_benchmark:
                     pause_reason = supervisor.halt_env
                     if should_mark_parent_env_closed(pause_reason):
                         await _halt_closed_env(
@@ -2308,7 +2305,7 @@ async def run_project_loop(manager: RunManager, project_id: str) -> None:
                     if empty_streak >= 5:
                         elapsed_now = _time.monotonic() - t_start
                         halt = bool(getattr(supervisor, "halt_env", None))
-                        if should_end_empty_streak(
+                        if ctf_clocks and should_end_empty_streak(
                             empty_streak=empty_streak,
                             elapsed_sec=elapsed_now,
                             min_hunt_sec=min_hunt_sec,
@@ -2525,7 +2522,7 @@ async def run_project_loop(manager: RunManager, project_id: str) -> None:
                     if empty_streak >= 5:
                         elapsed_now = _time.monotonic() - t_start
                         halt = bool(getattr(supervisor, "halt_env", None))
-                        if should_end_empty_streak(
+                        if ctf_clocks and should_end_empty_streak(
                             empty_streak=empty_streak,
                             elapsed_sec=elapsed_now,
                             min_hunt_sec=min_hunt_sec,
@@ -2565,6 +2562,8 @@ async def run_project_loop(manager: RunManager, project_id: str) -> None:
             # checkpoint：旧 stall 停跑 + AI 监督
             g2 = await gstore.get_graph(project_id)
             sig = (g2["stats"]["nodes"], g2["stats"]["edges"], g2["stats"]["findings"])
+            prev_nodes = last_node_count
+            prev_findings = last_finding_count
             graph_grew = False
             # 节点数增长或交旗 → 重置「无新点」墙钟（仅 nodes，不含边/finding）
             if sig[0] > last_node_count:
@@ -2594,6 +2593,25 @@ async def run_project_loop(manager: RunManager, project_id: str) -> None:
                     last_node_growth_mono = _time.monotonic()
                     last_progress_wall = _time.time()
                     graph_grew = True
+            if not ctf_clocks:
+                if sig[0] > prev_nodes or sig[2] > prev_findings:
+                    empty_rounds = 0
+                else:
+                    empty_rounds += 1
+                last_finding_count = sig[2]
+                from ..project_status import EMPTY_ROUND_STOP
+                if empty_rounds >= EMPTY_ROUND_STOP:
+                    summary = (
+                        f"已连续 {empty_rounds} 轮没有新节点也没有新漏洞"
+                        f"（≥{EMPTY_ROUND_STOP}），强制停止，记失败。"
+                    )
+                    pause_reason = "empty_rounds"
+                    await emit(
+                        project_id, "log",
+                        {"level": "info", "message": summary},
+                        run_id=rid,
+                    )
+                    break
             if ctf_clocks:
                 idle_plans, last_counted_pivots = note_graph_idle_plans(
                     idle_plans=idle_plans,
@@ -2671,7 +2689,7 @@ async def run_project_loop(manager: RunManager, project_id: str) -> None:
                 due = redteam_stall_pause_due(
                     nprog, stall_limit, ledger_allowed_ring(load_ledger(ws)),
                 )
-            if due:
+            if due and ctf_clocks:
                 n = int(getattr(supervisor, "no_progress", 0) or 0)
                 summary = (
                     f"连续 {n} 轮无高质量进展，暂停本次 run。"

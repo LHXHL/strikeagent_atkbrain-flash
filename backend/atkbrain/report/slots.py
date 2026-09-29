@@ -856,18 +856,66 @@ def assemble_deliverable(data: dict, *, enrich: dict | None = None, lang: object
     return html
 
 
+def _json_objects(raw: str) -> list[dict]:
+    """从正文里按括号配对取出 JSON 对象，后出现的优先留给调用方倒序挑选。"""
+    out: list[dict] = []
+    i = 0
+    n = len(raw)
+    while i < n:
+        start = raw.find("{", i)
+        if start < 0:
+            break
+        depth = 0
+        in_str = False
+        esc = False
+        end = -1
+        for j in range(start, n):
+            ch = raw[j]
+            if in_str:
+                if esc:
+                    esc = False
+                elif ch == "\\":
+                    esc = True
+                elif ch == '"':
+                    in_str = False
+                continue
+            if ch == '"':
+                in_str = True
+            elif ch == "{":
+                depth += 1
+            elif ch == "}":
+                depth -= 1
+                if depth == 0:
+                    end = j
+                    break
+        if end < 0:
+            break
+        blob = raw[start:end + 1]
+        data = None
+        for candidate in (blob, re.sub(r",\s*([}\]])", r"\1", blob)):
+            try:
+                parsed = json.loads(candidate)
+            except json.JSONDecodeError:
+                parsed = None
+            if isinstance(parsed, dict):
+                data = parsed
+                break
+        if data is not None:
+            out.append(data)
+        i = end + 1
+    return out
+
+
 def parse_claude_enrich(text: str) -> dict:
-    raw = (text or "").strip()
-    blob = raw
-    m = re.search(r"```(?:json)?\s*(\{[\s\S]*\})\s*```", raw)
-    if m:
-        blob = m.group(1)
-    else:
-        obj = re.search(r"\{[\s\S]*\}", raw)
-        if obj:
-            blob = obj.group(0)
-    try:
-        data = json.loads(blob)
-    except json.JSONDecodeError:
-        return {}
-    return data if isinstance(data, dict) else {}
+    raw = re.sub(r"<think>[\s\S]*?</think>", "", text or "", flags=re.I)
+    raw = re.sub(r"```(?:json)?", "", raw, flags=re.I)
+    objs = _json_objects(raw)
+    for data in reversed(objs):
+        if (
+            data.get("title_line")
+            or data.get("summary_overview")
+            or data.get("sub")
+            or data.get("findings")
+        ):
+            return data
+    return objs[-1] if objs else {}

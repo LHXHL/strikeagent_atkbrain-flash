@@ -17,6 +17,7 @@ from ..scope import (
     is_attacker_identity,
     is_platform_endpoint,
     local_self_hosts,
+    sensitive_attack_reason,
     unauthorized_peer_endpoint,
     unauthorized_private_host,
     unauthorized_public_host,
@@ -84,6 +85,9 @@ class AgentContext:
         if not host:
             host = (parsed.netloc or "").split("@")[-1].split(":")[0].lower()
         host = canonical_host(host)
+        why = sensitive_attack_reason(host)
+        if why:
+            return why
         port = parsed.port
         if not port:
             port = 443 if parsed.scheme == "https" else 80
@@ -217,19 +221,10 @@ class AgentContext:
             must = False
             try:
                 from ..proxy.pool import pool as _proxy_pool
-                from ..proxy.yakit import prepare_egress, should_use_yakit
                 must = _proxy_pool.must_proxy(self.objective)
-                if should_use_yakit(self.objective, self.project):
-                    eg = await prepare_egress(self.objective, self.project)
-                    if eg.refuse:
-                        return CmdResult(
-                            exit_code=-1, stdout="", stderr=eg.reason or NO_DIRECT_MSG,
-                            blocked=True, reason=eg.reason or NO_DIRECT_MSG, category="proxy",
-                        )
-                    extra_env = eg.extra_env
-                elif must:
+                if must:
                     px = await _proxy_pool.wait_pick(8.0, prefer_http=True)
-                    extra_env = _proxy_pool.proxy_env(px)  # runner 会再扩成多节点轮换
+                    extra_env = _proxy_pool.proxy_env(px)
             except Exception:
                 extra_env = None
             if must and not extra_env:
@@ -259,10 +254,6 @@ class AgentContext:
         if host in ("127.0.0.1", "localhost", "::1"):
             return None
         try:
-            from ..proxy.yakit import resolve_egress, should_use_yakit
-            if should_use_yakit(self.objective, self.project):
-                eg = resolve_egress(self.objective, self.project)
-                return None if eg.refuse else eg.proxy
             from ..proxy.pool import pool as _proxy_pool
             if not _proxy_pool.must_proxy(self.objective):
                 return None
@@ -280,16 +271,6 @@ class AgentContext:
                 must = _proxy_pool.must_proxy(self.objective)
             except Exception:
                 must = False
-        if not local:
-            from ..proxy.yakit import prepare_egress, should_use_yakit
-            if should_use_yakit(self.objective, self.project):
-                eg = await prepare_egress(self.objective, self.project)
-                if eg.refuse:
-                    raise RuntimeError(eg.reason or NO_DIRECT_MSG)
-                async with httpx.AsyncClient(
-                    follow_redirects=True, timeout=_HTTP_TIMEOUT, verify=False, proxy=eg.proxy,
-                ) as cli:
-                    return await cli.request(method, url, headers=headers, content=content)
         if not must:
             return await self._client().request(method, url, headers=headers, content=content)
 
@@ -326,9 +307,13 @@ class AgentContext:
         **_kw,
     ) -> dict:
         from ..exec.guard import target_destructive_reason
-        why = target_destructive_reason(
-            f"{method} {url} {data or ''}", objective=self.objective,
-        )
+        from ..scope import public_hosts_in_text, sensitive_attack_reason
+        blob = f"{method} {url} {data or ''}"
+        for h in public_hosts_in_text(blob):
+            why = sensitive_attack_reason(h)
+            if why:
+                return {"blocked": True, "error": f"越界：{why}", "status": 0}
+        why = target_destructive_reason(blob, objective=self.objective)
         if why:
             return {
                 "blocked": True,

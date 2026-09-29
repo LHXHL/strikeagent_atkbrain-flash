@@ -1,7 +1,7 @@
 # StrikeAgent_AtkBrain-Flash 控制台运行时。
 # 密钥不要写进本文件。Docker Compose 会读取仓库根目录的 .env：
 #   cp .env.example .env
-#   用编辑器打开 .env，填 DEEPSEEK_API_KEY=你的密钥（或 ANTHROPIC_AUTH_TOKEN）
+#   cp .env.example .env 后直接启动。模型在控制台「设置 → Pi 模型」的 JSON 里改。
 #   docker compose -f compose.yaml -f deploy/compose.build.yaml up -d --build --wait
 #
 # 默认 HTTPS：浏览器打开 https://<主机>:2334/…（自签，点继续）。API 仍是本机 HTTP :2333。

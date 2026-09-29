@@ -28,6 +28,8 @@ from .prompts import (
     default_fanout_roles,
     finding_review_system_prompt,
     FINDING_REVIEW_ROLE,
+    is_review_role,
+    review_pi_role,
 )
 from .tools import tool_names
 from ..i18n.locale import config_output_lang
@@ -152,7 +154,7 @@ class ProjectAgent:
         seen: set[str] = set()
         for r in raw:
             n = str(r or "").strip().lower()
-            if n == FINDING_REVIEW_ROLE:
+            if is_review_role(n):
                 continue
             if n in known and n not in seen:
                 out.append(n)
@@ -171,11 +173,19 @@ class ProjectAgent:
         self._connected = True
 
     async def close(self) -> None:
+        project = getattr(getattr(self, "ctx", None), "project", None)
         await self._stop_background()
         await self._close_sessions(keep_review=False)
         self._connected = False
         if getattr(self, "_owns_mcp", True):
             unregister_project_mcp(self.project_id)
+        try:
+            from ..engine.scheduler import manager as _mgr
+            if not getattr(_mgr, "shutting_down", False) and isinstance(project, dict):
+                from ..review.jobs import schedule_drain
+                schedule_drain(project)
+        except Exception:
+            pass
         try:
             await self.ctx.aclose()
         except Exception:
@@ -188,7 +198,7 @@ class ProjectAgent:
         if not halt:
             sessions = [
                 s for s in sessions
-                if str(getattr(s, "role", "") or "") != FINDING_REVIEW_ROLE
+                if not is_review_role(str(getattr(s, "role", "") or ""))
             ]
         for s in sessions:
             try:
@@ -224,7 +234,7 @@ class ProjectAgent:
 
     async def _abort_roles(self, roles: set[str]) -> list[str]:
         """中止指定角色的 Pi（从者收工后收掉仍在跑的工人）。不碰二次验证会话。"""
-        want = {str(r) for r in roles if r and r not in ("lead", FINDING_REVIEW_ROLE)}
+        want = {str(r) for r in roles if r and r != "lead" and not is_review_role(str(r))}
         aborted: list[str] = []
         for s in list(self._sessions):
             role = str(getattr(s, "role", "") or "")
@@ -241,7 +251,7 @@ class ProjectAgent:
         """结束本轮从者/工人的 prompt，进程保留给下一轮。不杀复核 Pi。"""
         for s in list(self._sessions):
             role = str(getattr(s, "role", "") or "")
-            if role == FINDING_REVIEW_ROLE:
+            if is_review_role(role):
                 continue
             try:
                 await s.abort()
@@ -252,15 +262,15 @@ class ProjectAgent:
         if keep_review:
             drop = [
                 s for s in self._sessions
-                if str(getattr(s, "role", "") or "") != FINDING_REVIEW_ROLE
+                if not is_review_role(str(getattr(s, "role", "") or ""))
             ]
             keep = [
                 s for s in self._sessions
-                if str(getattr(s, "role", "") or "") == FINDING_REVIEW_ROLE
+                if is_review_role(str(getattr(s, "role", "") or ""))
             ]
             self._sessions = keep
             for role, sess in list(self._pi_pool.items()):
-                if role != FINDING_REVIEW_ROLE:
+                if not is_review_role(role):
                     self._pi_pool.pop(role, None)
                     if sess not in drop:
                         drop.append(sess)
@@ -288,7 +298,7 @@ class ProjectAgent:
         await self._abort_hunt_prompts()
         dead: list[PiSession] = []
         for role, sess in list(self._pi_pool.items()):
-            if role == FINDING_REVIEW_ROLE:
+            if is_review_role(role):
                 continue
             dead.append(sess)
             self._pi_pool.pop(role, None)
@@ -354,16 +364,26 @@ class ProjectAgent:
             return
 
     async def _review_loop(self) -> None:
+        attempts: dict[tuple[str, str], int] = {}
         while not self._stopped:
             await self._review_wake.wait()
             if self._stopped:
                 return
             self._review_wake.clear()
-            try:
-                async with self._review_lock:
-                    await self._run_finding_review()
-            except Exception:
-                pass
+            while not self._stopped:
+                try:
+                    n = await self._spawn_review_batch(attempts)
+                except Exception:
+                    n = 0
+                try:
+                    await self._announce_review_live()
+                except Exception:
+                    pass
+                if not n:
+                    self._schedule_pages()
+                    break
+                if self._review_wake.is_set():
+                    self._review_wake.clear()
 
     def _schedule_pages(self) -> None:
         if self._stopped:
@@ -386,63 +406,156 @@ class ProjectAgent:
         except Exception:
             pass
 
-    async def _run_finding_review(self) -> int:
-        """按当前开关对缺二次/缺评级的入库漏洞开专职复核 Pi。"""
+    async def _spawn_review_batch(self, attempts: dict[tuple[str, str], int]) -> int:
+        """每条漏洞的二次验证、红队评级各拉起一个 Pi，不等前一条结束。"""
         from ..graph.store import findings_pending_review
         from ..review.flags import get_review_flags
-        from ..review.jobs import release, try_claim
+        from ..review.jobs import review_attempt_open, try_claim
 
         flags = get_review_flags()
         if not flags["secondary_verify"] and not flags["redteam_rating"]:
-            self._schedule_pages()
             return 0
         try:
             pending = await findings_pending_review(self.project_id)
         except Exception:
             pending = []
-        kept: list[dict] = []
-        claimed: list[str] = []
+        spawned = 0
         for f in pending:
             fid = str(f.get("id") or "")
-            mode = str(f.get("_review_mode") or "both")
-            job = try_claim(self.project_id, fid, mode, source="auto") if fid else None
-            if fid and job is None:
-                continue
-            if job:
-                f["_job_id"] = job["id"]
-                claimed.append(job["id"])
-            kept.append(f)
-        if not kept:
-            self._schedule_pages()
-            return 0
+            raw = str(f.get("_review_mode") or "both")
+            modes = ["secondary", "rating"] if raw == "both" else [raw]
+            for mode in modes:
+                if mode not in ("secondary", "rating"):
+                    continue
+                if not fid or not review_attempt_open(attempts, fid, mode):
+                    continue
+                job = try_claim(self.project_id, fid, mode, source="auto")
+                if job is None:
+                    continue
+                item = dict(f)
+                item["_review_mode"] = mode
+                item["_job_id"] = job["id"]
+                task = asyncio.get_running_loop().create_task(
+                    self._review_job(item, mode, attempts)
+                )
+                self._track_review_task(task)
+                spawned += 1
+        return spawned
+
+    def _track_review_task(self, task: asyncio.Task) -> None:
+        bag = getattr(self, "_review_jobs", None)
+        if bag is None:
+            bag = set()
+            self._review_jobs = bag
+        bag.add(task)
+        task.add_done_callback(lambda t: bag.discard(t))
+
+    async def _review_job(self, item: dict, mode: str, attempts: dict[tuple[str, str], int]) -> None:
+        from ..graph.store import findings_pending_review
+        from ..review.jobs import note_review_attempt, release, review_attempt_open
+
+        jid = str(item.get("_job_id") or "")
+        fid = str(item.get("id") or "")
         err = ""
         try:
-            return await self._run_finding_review_items(kept)
+            await self._run_finding_review_items([item], mode=mode, announce=False)
         except Exception as e:
             err = str(e)[:240]
-            raise
         finally:
-            for jid in claimed:
-                job = None
-                try:
-                    from ..review.jobs import snapshot as _snap
-                    job = _snap(jid)
-                except Exception:
-                    job = None
-                if job and job.get("status") in ("queued", "running"):
-                    release(jid, status="error" if err else "done", error=err)
+            if jid:
+                release(jid, status="error" if err else "done", error=err)
+            still = False
+            try:
+                pending = await findings_pending_review(self.project_id)
+            except Exception:
+                pending = []
+            for row in pending or []:
+                if str(row.get("id") or "") != fid:
+                    continue
+                need = str(row.get("_review_mode") or "both")
+                if need == mode or need == "both":
+                    still = True
+            if still:
+                n = note_review_attempt(attempts, fid, mode)
+                if not review_attempt_open(attempts, fid, mode):
+                    try:
+                        await emit(
+                            self.project_id, "log",
+                            {"level": "warn", "message": f"专职复核已试 {n} 次仍未写回这一条，先做下一条。"},
+                            run_id=self.ctx.run_id,
+                        )
+                    except Exception:
+                        pass
+            try:
+                await self._announce_review_live()
+            except Exception:
+                pass
+            self._kick_review()
 
-    async def review_one(self, finding: dict, mode: str) -> int:
+    async def review_one(self, finding: dict, mode: str, job_id: str = "") -> int:
         """单条手动复核（调用方已占 job；此处不再 claim）。"""
         item = dict(finding or {})
         m = str(mode or "both").strip().lower()
-        if m not in ("secondary", "rating", "both"):
-            m = "both"
+        if m not in ("secondary", "rating"):
+            m = "secondary"
         item["_review_mode"] = m
-        async with self._review_lock:
-            return await self._run_finding_review_items([item], mode=m)
+        if job_id:
+            item["_job_id"] = job_id
+        return await self._run_finding_review_items([item], mode=m)
 
-    async def _run_finding_review_items(self, pending: list[dict], mode: str | None = None) -> int:
+    async def _announce_review_live(self) -> None:
+        """只广播真正在跑的复核，排队不算进行中。"""
+        from ..review.jobs import list_active
+
+        rows = [
+            j for j in list_active()
+            if str(j.get("project_id") or "") == self.project_id and j.get("status") == "running"
+        ]
+        ids = [str(j.get("finding_id") or "") for j in rows if j.get("finding_id")]
+        titles: list[str] = []
+        for j in rows:
+            mode = {"secondary": "二次验证", "rating": "红队评级"}.get(str(j.get("mode") or ""), "")
+            detail = str(j.get("detail") or "")[:40]
+            titles.append(f"{mode} {detail}".strip())
+        payload = {
+            "status": "running" if ids else "done",
+            "count": len(ids),
+            "ids": ids,
+            "titles": titles,
+            "role": FINDING_REVIEW_ROLE,
+        }
+        try:
+            await emit(self.project_id, "finding_review", payload, run_id=self.ctx.run_id)
+        except Exception:
+            pass
+
+    async def _announce_review_queue(self, pending: list[dict], *, attempts: dict[tuple[str, str], int] | None = None) -> None:
+        """整队还没做完就保持 running，避免做完一条就把其余显示成已停止。"""
+        from ..review.jobs import review_attempt_open
+
+        book = attempts or {}
+        open_rows = [
+            f for f in pending
+            if review_attempt_open(
+                book, str(f.get("id") or ""), str(f.get("_review_mode") or "both"),
+            )
+        ]
+        ids = [str(f.get("id") or "") for f in open_rows if f.get("id")]
+        payload = {
+            "status": "running" if ids else "done",
+            "count": len(ids),
+            "ids": ids,
+            "titles": [str(f.get("title") or "")[:80] for f in open_rows],
+            "role": FINDING_REVIEW_ROLE,
+        }
+        try:
+            await emit(self.project_id, "finding_review", payload, run_id=self.ctx.run_id)
+        except Exception:
+            pass
+
+    async def _run_finding_review_items(
+        self, pending: list[dict], mode: str | None = None, *, announce: bool = True,
+    ) -> int:
         if not pending:
             self._schedule_pages()
             return 0
@@ -467,45 +580,53 @@ class ProjectAgent:
             },
             run_id=self.ctx.run_id,
         )
-        await emit(
-            self.project_id, "finding_review",
-            {
-                "status": "running",
-                "mode": run_mode,
-                "finding_id": ids[0] if len(ids) == 1 else "",
-                "count": len(pending),
-                "ids": ids,
-                "titles": [str(f.get("title") or "")[:80] for f in pending],
-                "role": FINDING_REVIEW_ROLE,
-            },
-            run_id=self.ctx.run_id,
-        )
+        if announce:
+            await emit(
+                self.project_id, "finding_review",
+                {
+                    "status": "running",
+                    "mode": run_mode,
+                    "finding_id": ids[0] if len(ids) == 1 else "",
+                    "count": len(pending),
+                    "ids": ids,
+                    "titles": [str(f.get("title") or "")[:80] for f in pending],
+                    "role": FINDING_REVIEW_ROLE,
+                },
+                run_id=self.ctx.run_id,
+            )
+        role = FINDING_REVIEW_ROLE
+        job_id = ""
+        if len(pending) == 1 and run_mode in ("secondary", "rating"):
+            role = review_pi_role(ids[0], run_mode)
+            job_id = str(pending[0].get("_job_id") or "")
         try:
             await self._run_one(
-                FINDING_REVIEW_ROLE,
+                role,
                 finding_review_system_prompt(
                     self.workspace_dir, self.objective, output_lang=self._output_lang(),
                     mode=run_mode,
                 ),
                 build_finding_review_instruction(pending, mode=run_mode),
+                job_id=job_id,
             )
             self._schedule_pages()
         finally:
-            try:
-                await emit(
-                    self.project_id, "finding_review",
-                    {
-                        "status": "done",
-                        "mode": run_mode,
-                        "finding_id": ids[0] if len(ids) == 1 else "",
-                        "count": len(pending),
-                        "ids": ids,
-                        "role": FINDING_REVIEW_ROLE,
-                    },
-                    run_id=self.ctx.run_id,
-                )
-            except Exception:
-                pass
+            if announce:
+                try:
+                    await emit(
+                        self.project_id, "finding_review",
+                        {
+                            "status": "done",
+                            "mode": run_mode,
+                            "finding_id": ids[0] if len(ids) == 1 else "",
+                            "count": len(pending),
+                            "ids": ids,
+                            "role": FINDING_REVIEW_ROLE,
+                        },
+                        run_id=self.ctx.run_id,
+                    )
+                except Exception:
+                    pass
         return len(pending)
 
     def _pi_lock(self, role: str) -> asyncio.Lock:
@@ -551,8 +672,18 @@ class ProjectAgent:
                 self._sessions.append(sess)
             return sess
 
-    async def _run_one(self, role: str, system_prompt: str, instruction: str) -> dict:
+    async def _run_one(self, role: str, system_prompt: str, instruction: str, *, job_id: str = "") -> dict:
         sess = await self._acquire_pi(role, system_prompt)
+        dedicated = is_review_role(role) and role != FINDING_REVIEW_ROLE
+        if job_id:
+            try:
+                sess.review_job_id = job_id
+            except Exception:
+                pass
+            from ..review.jobs import mark_running, note_review_pid
+            proc = getattr(sess, "proc", None)
+            note_review_pid(job_id, int(getattr(proc, "pid", 0) or 0))
+            mark_running(job_id, "等待模型回复")
         try:
             text = await sess.prompt(instruction, timeout=0)
             return {"text": text, "tool_uses": int(sess.tool_uses or 0), "role": role}
@@ -569,6 +700,22 @@ class ProjectAgent:
             except ValueError:
                 pass
             raise
+        finally:
+            if job_id:
+                try:
+                    sess.review_job_id = ""
+                except Exception:
+                    pass
+            if dedicated:
+                self._pi_pool.pop(role, None)
+                try:
+                    self._sessions.remove(sess)
+                except ValueError:
+                    pass
+                try:
+                    await sess.close()
+                except Exception:
+                    pass
 
     async def run_turn(self, instruction: str) -> dict:
         try:
@@ -639,7 +786,11 @@ class ProjectAgent:
             lead_closed = False
             t0 = time.monotonic()
             try:
-                cap = float(getattr(settings, "turn_must_close_sec", 0) or 0)
+                from ..project_status import uses_ctf_hunt_clocks
+                if uses_ctf_hunt_clocks(getattr(self, "objective", None)):
+                    cap = float(getattr(settings, "turn_must_close_sec", 0) or 0)
+                else:
+                    cap = 0.0
             except (TypeError, ValueError):
                 cap = 0.0
 
@@ -649,11 +800,13 @@ class ProjectAgent:
                     if not name or name in by_role:
                         try:
                             t.result()
-                        except Exception:
+                        except (Exception, asyncio.CancelledError):
                             pass
                         continue
                     try:
                         by_role[name] = t.result()
+                    except asyncio.CancelledError as e:
+                        by_role[name] = e
                     except Exception as e:
                         by_role[name] = e
 
@@ -749,6 +902,11 @@ class ProjectAgent:
                 await self.interrupt()
             except Exception:
                 pass
+        if isinstance(first_err, asyncio.CancelledError):
+            current = asyncio.current_task()
+            if current is not None and current.cancelling():
+                raise first_err
+            first_err = None
         if first_err and not texts and not self.ctx.goal_reached:
             raise first_err
         return {
@@ -773,7 +931,7 @@ class ProjectAgent:
         now = time.monotonic()
         drop: list[tuple[str, PiSession]] = []
         for role, sess in list(self._pi_pool.items()):
-            if role in ("lead", FINDING_REVIEW_ROLE):
+            if role == "lead" or is_review_role(role):
                 continue
             if role in used:
                 sess.idle_turns = 0

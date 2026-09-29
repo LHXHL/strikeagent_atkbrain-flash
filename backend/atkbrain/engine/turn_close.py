@@ -27,7 +27,7 @@ WORKER_ABORT_GRACE_SEC = 15.0
 def role_wrote_turn_done(text: str, *, role: str = "") -> bool:
     """该角色正文是否在收工。二次验证会话不收口。"""
     r = str(role or "").strip().lower()
-    if r in ("finding-review",):
+    if r == "finding-review" or r.startswith("finding-review:"):
         return False
     blob = str(text or "")
     if not blob.strip():

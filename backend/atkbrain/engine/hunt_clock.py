@@ -12,6 +12,7 @@ from typing import Any
 HUNT_RESET_REASONS = frozenset({
     "runtime_cap",
     "turn_cap",
+    "empty_rounds",
     "graph_idle",
     "goal_reached",
     "entry_dead",
@@ -28,6 +29,7 @@ def empty_hunt() -> dict[str, Any]:
         "reviewed_elapsed_sec": None,
         "idle_sec": 0.0,
         "idle_plans": 0,
+        "empty_rounds": 0,
     }
 
 
@@ -72,6 +74,10 @@ def parse_hunt(cfg: dict | None) -> dict[str, Any]:
         base["idle_plans"] = max(0, int(raw.get("idle_plans") or 0))
     except (TypeError, ValueError):
         base["idle_plans"] = 0
+    try:
+        base["empty_rounds"] = max(0, int(raw.get("empty_rounds") or 0))
+    except (TypeError, ValueError):
+        base["empty_rounds"] = 0
     return base
 
 
@@ -165,6 +171,7 @@ def snapshot_hunt(
     reviewed_elapsed_sec: float | None,
     idle_sec: float,
     idle_plans: int = 0,
+    empty_rounds: int = 0,
 ) -> dict[str, Any]:
     return {
         "turn": max(0, int(turn)),
@@ -174,6 +181,7 @@ def snapshot_hunt(
         ),
         "idle_sec": max(0.0, float(idle_sec)),
         "idle_plans": max(0, int(idle_plans or 0)),
+        "empty_rounds": max(0, int(empty_rounds or 0)),
     }
 
 

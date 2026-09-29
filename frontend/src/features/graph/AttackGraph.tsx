@@ -4,7 +4,6 @@ import {
 } from "d3-force";
 import type { Graph, GraphEdge, GraphNode } from "../../types";
 import { nodeTypeColor, graphNodeTypeLabel, graphNodeDisplayType, graphNodeDisplaySeverity, isGetshellNode, showsShellStar, severityColor, severityLabel, displayFindingSeverity, lateralColor, formatNodeDetail, scrubCandidateRceLabel } from "../../theme";
-import { popIn } from "../../anim";
 import { useT } from "../../i18n";
 
 interface SimNode extends GraphNode {
@@ -23,6 +22,8 @@ const MAX_K = 3.2;
 const FIT_PAD = 36;
 /** 未连线节点相对所属目标的最远距离，防止飞出把全览缩没 */
 const ORPHAN_MAX_R = 360;
+/** 任意节点离所属目标的上限，避免一次斥力把点甩出视口 */
+const MAX_FROM_HOME = 780;
 /** 按攻击链阶段向外分层，避免全部挤在目标周围 */
 const TYPE_RING: Record<string, number> = {
   target: 0,
@@ -304,40 +305,18 @@ function isOrphanNode(n: GraphNode, connected: Set<string>) {
   return n.type !== "target" && !connected.has(n.key);
 }
 
-/** 用主簇（已连线 + 目标）做包围盒；离群未连线点不拖垮缩放 */
+/** 用全部有坐标的节点做包围盒，避免边伸到视口外、端点却看不见。 */
 function computeFit(
   nodes: SimNode[],
   viewport: { width: number; height: number },
-  connected: Set<string>,
   pad = FIT_PAD,
 ) {
   if (!nodes.length) return { x: 0, y: 0, k: 1 };
   const finite = nodes.filter(isFinitePos);
   if (!finite.length) return { x: 0, y: 0, k: 1 };
 
-  const core = finite.filter((n) => n.type === "target" || connected.has(n.key));
-  const base = core.length ? core : finite;
-
   let minX = Infinity, minY = Infinity, maxX = -Infinity, maxY = -Infinity;
-  for (const n of base) {
-    const r = collideRadius(n);
-    minX = Math.min(minX, n.x - r);
-    minY = Math.min(minY, n.y - r);
-    maxX = Math.max(maxX, n.x + r);
-    maxY = Math.max(maxY, n.y + r + 14);
-  }
-
-  const coreKeys = new Set(base.map((n) => n.key));
-  const cx0 = (minX + maxX) / 2;
-  const cy0 = (minY + maxY) / 2;
-  const coreSpan = Math.max(maxX - minX, maxY - minY, 160);
-  // 仅吸收「贴着主簇」的孤立点；飞太远的不参与适配
-  const absorbR = Math.max(ORPHAN_MAX_R * 0.85, coreSpan * 0.55);
-
   for (const n of finite) {
-    if (coreKeys.has(n.key)) continue;
-    const d = Math.hypot(n.x - cx0, n.y - cy0);
-    if (d > absorbR) continue;
     const r = collideRadius(n);
     minX = Math.min(minX, n.x - r);
     minY = Math.min(minY, n.y - r);
@@ -388,6 +367,50 @@ function restrainOrphans(
   }
 }
 
+/** 把飞出所属目标的点拉回来，保证适配时每个圆点都在同一张图里。 */
+function clampSpread(
+  nodes: SimNode[],
+  home: Map<string, string>,
+  slots: Map<string, { x: number; y: number }>,
+) {
+  const byKey = new Map(nodes.map((n) => [n.key, n]));
+  nodes.forEach((n, i) => {
+    if (n.type === "target") {
+      const slot = slots.get(n.key);
+      if (slot && n.fx == null) {
+        n.x = slot.x;
+        n.y = slot.y;
+      }
+      n.vx = 0;
+      n.vy = 0;
+      return;
+    }
+    const hk = home.get(n.key) || "";
+    const anchorNode = hk ? byKey.get(hk) : undefined;
+    const anchor = anchorNode && isFinitePos(anchorNode)
+      ? anchorNode
+      : (slots.get(hk) || { x: TARGET_X, y: TARGET_Y });
+    if (!isFinitePos(n)) {
+      const p = seedPosition(n, i, nodes.length, hk, slots);
+      n.x = p.x;
+      n.y = p.y;
+      n.vx = 0;
+      n.vy = 0;
+      return;
+    }
+    const dx = n.x - anchor.x;
+    const dy = n.y - anchor.y;
+    const dist = Math.hypot(dx, dy) || 1;
+    if (dist > MAX_FROM_HOME) {
+      const s = MAX_FROM_HOME / dist;
+      n.x = anchor.x + dx * s;
+      n.y = anchor.y + dy * s;
+    }
+    n.vx = 0;
+    n.vy = 0;
+  });
+}
+
 /** 检测是否严重塌缩：多数节点挤在一起 */
 function isCollapsed(nodes: SimNode[]) {
   if (nodes.length < 3) return false;
@@ -427,20 +450,19 @@ export function AttackGraph({ graph, onSelect, selectedKey, onClear }: { graph: 
   const viewportRef = useRef({ width: W, height: H });
   const fitPendingRef = useRef(true);
   const autoFitRef = useRef(true);
-  const fitFrameRef = useRef<number | null>(null);
   const topoRef = useRef("");
-  const tickCountRef = useRef(0);
   const relayoutRef = useRef(0);
   const connectedRef = useRef<Set<string>>(new Set());
   const homeRef = useRef<Map<string, string>>(new Map());
   const slotsRef = useRef<Map<string, { x: number; y: number }>>(new Map());
+  const [layoutReady, setLayoutReady] = useState(false);
   const [, setFrame] = useState(0);
   const [view, setView] = useState({ x: 0, y: 0, k: 1 });
   const [fullscreen, setFullscreen] = useState(false);
   const [viewport, setViewport] = useState({ width: W, height: H });
   const dragRef = useRef<{
-    node: SimNode | null; panning: boolean; sx: number; sy: number; ox: number; oy: number;
-  }>({ node: null, panning: false, sx: 0, sy: 0, ox: 0, oy: 0 });
+    node: SimNode | null; panning: boolean; moved: boolean; sx: number; sy: number; ox: number; oy: number;
+  }>({ node: null, panning: false, moved: false, sx: 0, sy: 0, ox: 0, oy: 0 });
 
   // 每个已获取 RCE 的 target 都有一条独立橙色最优路径；兼容旧快照仅含 path 的情形。
   const rcePaths = useMemo(() => {
@@ -475,7 +497,7 @@ export function AttackGraph({ graph, onSelect, selectedKey, onClear }: { graph: 
   }, []);
 
   const fitToNodes = useCallback((keepPending = false) => {
-    const next = computeFit(nodesRef.current, viewportRef.current, connectedRef.current);
+    const next = computeFit(nodesRef.current, viewportRef.current);
     applyView(next);
     fitPendingRef.current = keepPending;
   }, [applyView]);
@@ -589,8 +611,41 @@ export function AttackGraph({ graph, onSelect, selectedKey, onClear }: { graph: 
     });
   }, []);
 
+  // 同步算完再画。实时 tick 会先把点甩开，第一帧就是错的。
+  const finishLayout = useCallback((reseed: boolean) => {
+    const nodes = nodesRef.current;
+    if (!nodes.length) return;
+    if (reseed) reseedLayout(nodes);
+    simRef.current?.stop();
+    const sim = forceSimulation<SimNode>(nodes).alphaDecay(0.055).velocityDecay(0.45).stop();
+    applyForces(
+      sim,
+      linksRef.current,
+      connectedRef.current,
+      nodes,
+      homeRef.current,
+      slotsRef.current,
+    );
+    const warm = () => {
+      sim.alpha(1);
+      for (let i = 0; i < 160; i++) sim.tick();
+      restrainOrphans(nodes, connectedRef.current, null, homeRef.current, slotsRef.current);
+    };
+    warm();
+    if (nodes.length > 2 && isCollapsed(nodes)) {
+      reseedLayout(nodes);
+      warm();
+    }
+    clampSpread(nodes, homeRef.current, slotsRef.current);
+    sim.stop();
+    simRef.current = sim;
+    if (autoFitRef.current) fitToNodes();
+    setFrame((f) => f + 1);
+  }, [applyForces, reseedLayout, fitToNodes]);
+
   // 重建/协调仿真：只在拓扑变化时跑。snapshot/轮询换新数组不得重绑 forceLink（否则边端点错位、点叠成一团）。
   useEffect(() => {
+    if (!layoutReady) return;
     const g = graphRef.current;
     const existing = new Map(nodesRef.current.map((n) => [n.key, n]));
     const topoChanged = topo !== topoRef.current;
@@ -679,65 +734,18 @@ export function AttackGraph({ graph, onSelect, selectedKey, onClear }: { graph: 
       }
     }
 
-    simRef.current?.stop();
-    tickCountRef.current = 0;
-    const sim = forceSimulation<SimNode>(nodes).alphaDecay(0.022).velocityDecay(0.32);
-    applyForces(sim, links, connected, nodes, home, slots);
-    sim
-      .on("tick", () => {
-        tickCountRef.current += 1;
-        restrainOrphans(
-          nodesRef.current,
-          connectedRef.current,
-          dragRef.current.node?.key ?? null,
-          homeRef.current,
-          slotsRef.current,
-        );
-        if (
-          tickCountRef.current === 45
-          && relayoutRef.current < 2
-          && isCollapsed(nodesRef.current)
-          && !dragRef.current.node
-        ) {
-          relayoutRef.current += 1;
-          reseedLayout(nodesRef.current);
-          applyForces(
-            simRef.current, linksRef.current, connectedRef.current,
-            nodesRef.current, homeRef.current, slotsRef.current,
-          );
-          simRef.current?.alpha(1).restart();
-        }
-        if (fitFrameRef.current == null) {
-            fitFrameRef.current = requestAnimationFrame(() => {
-              fitFrameRef.current = null;
-              setFrame((f) => f + 1);
-              if (tickCountRef.current === 8 && autoFitRef.current) fitToNodes();
-            });
-        }
-      })
-      .on("end", () => {
-        if (autoFitRef.current) fitToNodes();
-      });
-    simRef.current = sim;
-
     const fresh = nodes.filter((n) => !seenRef.current.has(n.key));
     fresh.forEach((n) => seenRef.current.add(n.key));
     if (fresh.length) {
       autoFitRef.current = true;
       fitPendingRef.current = true;
-      requestAnimationFrame(() => {
-        const els = fresh
-          .map((n) => svgRef.current?.querySelector(`[data-node="${CSS.escape(n.key)}"]`))
-          .filter(Boolean);
-        if (els.length) popIn(els as any);
-      });
     }
+    finishLayout(false);
 
     return () => {
-      sim.stop();
-      if (simRef.current === sim) simRef.current = null;
+      simRef.current?.stop();
     };
-  }, [topo, fitToNodes, applyForces, reseedLayout]);
+  }, [topo, layoutReady, finishLayout]);
 
   // 指针锚定滚轮缩放
   useEffect(() => {
@@ -778,11 +786,17 @@ export function AttackGraph({ graph, onSelect, selectedKey, onClear }: { graph: 
     const el = wrapRef.current;
     if (!el || typeof ResizeObserver === "undefined") return;
     const ro = new ResizeObserver(() => {
+      const rect = el.getBoundingClientRect();
+      if (rect.width > 40 && rect.height > 40) setLayoutReady(true);
+      const hot = (simRef.current?.alpha?.() ?? 0) > 0.08;
+      if (hot) return;
       autoFitRef.current = true;
       fitPendingRef.current = true;
       scheduleViewportFit();
     });
     ro.observe(el);
+    const rect = el.getBoundingClientRect();
+    if (rect.width > 40 && rect.height > 40) setLayoutReady(true);
     scheduleViewportFit();
     return () => ro.disconnect();
   }, [scheduleViewportFit]);
@@ -804,10 +818,9 @@ export function AttackGraph({ graph, onSelect, selectedKey, onClear }: { graph: 
   const onDown = (e: React.MouseEvent, n?: SimNode) => {
     if (n) {
       dragRef.current.node = n;
-      n.fx = null;
-      n.fy = null;
-      autoFitRef.current = false;
-      simRef.current?.alphaTarget(0.25).restart();
+      dragRef.current.moved = false;
+      dragRef.current.sx = e.clientX;
+      dragRef.current.sy = e.clientY;
     } else {
       autoFitRef.current = false;
       dragRef.current.panning = true;
@@ -820,9 +833,16 @@ export function AttackGraph({ graph, onSelect, selectedKey, onClear }: { graph: 
   const onMove = (e: React.MouseEvent) => {
     const d = dragRef.current;
     if (d.node) {
+      const dist = Math.hypot(e.clientX - d.sx, e.clientY - d.sy);
+      if (dist < 5 && !d.moved) return;
+      d.moved = true;
+      autoFitRef.current = false;
       const w = toWorld(e.clientX, e.clientY);
+      d.node.x = w.x;
+      d.node.y = w.y;
       d.node.fx = w.x;
       d.node.fy = w.y;
+      setFrame((f) => f + 1);
     } else if (d.panning && svgRef.current) {
       const rect = svgRef.current.getBoundingClientRect();
       const dx = ((e.clientX - d.sx) / rect.width) * viewportRef.current.width;
@@ -832,16 +852,14 @@ export function AttackGraph({ graph, onSelect, selectedKey, onClear }: { graph: 
   };
   const onUp = () => {
     const d = dragRef.current;
-    if (d.node) {
+    if (d.node && d.moved) {
       if (d.node.type === "target") {
-        // 拖完钉在落点，保持多目标分区；不弹回单一原点
         d.node.fx = d.node.x;
         d.node.fy = d.node.y;
       } else {
         d.node.fx = null;
         d.node.fy = null;
       }
-      simRef.current?.alphaTarget(0);
     }
     d.node = null;
     d.panning = false;
@@ -859,20 +877,15 @@ export function AttackGraph({ graph, onSelect, selectedKey, onClear }: { graph: 
   };
 
   const relayout = () => {
-    reseedLayout(nodesRef.current);
     relayoutRef.current = 0;
-    tickCountRef.current = 0;
     autoFitRef.current = true;
     fitPendingRef.current = true;
-    applyForces(
-      simRef.current, linksRef.current, connectedRef.current,
-      nodesRef.current, homeRef.current, slotsRef.current,
-    );
-    simRef.current?.alpha(1).restart();
+    finishLayout(true);
   };
 
   const nodes = nodesRef.current;
   const links = linksRef.current;
+  const nodeByKey = new Map(nodes.map((n) => [n.key, n]));
   const selectedNode = selectedKey ? nodes.find((n) => n.key === selectedKey) : null;
   const selectedData = (selectedKey && graph.nodes.find((n) => n.key === selectedKey)) || selectedNode;
   const selectedInbound = selectedData ? graph.edges.filter((e) => e.to === selectedData.key) : [];
@@ -927,6 +940,9 @@ export function AttackGraph({ graph, onSelect, selectedKey, onClear }: { graph: 
       >
         <g transform={`translate(${view.x},${view.y}) scale(${view.k})`}>
           {links.map((l: any) => {
+            const a = nodeByKey.get(l.from);
+            const b = nodeByKey.get(l.to);
+            if (!a || !b || !isFinitePos(a) || !isFinitePos(b)) return null;
             // 只高亮路径上相邻节点对，避免路径上任意两点的捷径边被当成最优路径
             const onRce = l.on_rce_path || rcePairs.has(`${l.from}\0${l.to}`);
             // 内网横向边（PIVOTS_TO）优先用专用醒目样式，即便同时在 RCE 路径上
@@ -938,7 +954,7 @@ export function AttackGraph({ graph, onSelect, selectedKey, onClear }: { graph: 
             return (
               <line
                 key={l.id}
-                x1={l.source.x} y1={l.source.y} x2={l.target.x} y2={l.target.y}
+                x1={a.x} y1={a.y} x2={b.x} y2={b.y}
                 className={cls}
               />
             );

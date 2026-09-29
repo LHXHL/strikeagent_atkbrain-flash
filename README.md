@@ -24,7 +24,7 @@
 
 ## 架构
 
-控制台调度猎面；攻击图驱动自循环。从者整轮打完再问御主，卡住或到周期才开口；对话框里的人工指令立刻打断本轮。收工把手法蒸馏进记忆库。运行时是 Pi（`deepseek-flash`）。红队 / 蓝队/SRC 的 HTTP 第一跳是本机 Yakit MITM，下游仍是出口代理池。
+控制台调度猎面；攻击图驱动自循环。从者整轮打完再问御主，卡住或到周期才开口；对话框里的人工指令立刻打断本轮。收工把手法蒸馏进记忆库。运行时是 Pi，用哪家模型在设置里的 JSON 里定。红队 / 蓝队/SRC 默认直连真实 IP；只有打开设置里导入的代理池才走代理。
 
 ![StrikeAgent_AtkBrain-Flash 架构](docs/assets/architecture.png)
 
@@ -78,29 +78,118 @@ Tsecbench v1 **第 1 名**（`StrikeAgent_AtkBrain-Flash`，97.89 / 100）。腾
 
 ## 环境与安装
 
-Docker（Kali，host 网络）：
+两种搭法挑一种。Docker 把控制台、Pi 和常用探测工具打进镜像。Linux 实例不用容器，用 systemd 在这台机器上常驻。不要两套同时占 `2333` / `2334`。
+
+模型不在安装时选定。控制台起来之后，到设置里改 Pi 的 JSON。`.env` 只放本机口令和端口，不要把供应商密钥写进去。数据都在 `backend/data/`（gitignore），升级镜像或重装服务都不会盖掉库、入口和已保存的模型 JSON。
+
+### Docker 搭建
+
+需要 Docker 与 Docker Compose 插件。在仓库根目录（有 `compose.yaml` 和 `.env.example` 的那一层）执行。Linux 用 host 网络，浏览器所在机器要能访问这台主机的 `2334`。macOS 的 Docker Desktop 没有 host 网络，启动时多加一份 `deploy/compose.mac.yaml`，这时控制台只绑在本机 `127.0.0.1`。
 
 ```bash
 git clone <本仓库 URL>
 cd StrikeAgent_AtkBrain-Flash
-# 进入项目根目录（有 compose.yaml、.env.example 的那一层）
 cp .env.example .env
-# 打开 .env，填 DEEPSEEK_API_KEY=你的密钥（猎面调模型用；不填控制台能开、猎面不跑）
+# .env 保持默认即可。首次登录是 admin / admin，登录后必须改密。
+# 不要在这里填模型密钥。
+
+# Linux
 docker compose -f compose.yaml -f deploy/compose.build.yaml up -d --build --wait
-# 编镜像、启动容器，等到探活通过再返回
-docker compose exec atkbrain python -m atkbrain.panel
-# 打印带随机入口的 https 登录地址和当前口令（只这台机器能看）
+
+# macOS
+# docker compose -f compose.yaml -f deploy/compose.build.yaml -f deploy/compose.mac.yaml up -d --build --wait
 ```
 
-用 panel 打印的 **https** 地址（自签证书点继续）。首次 `admin` / `admin`，登录后必须改密。控制台 `:2334`，API `:2333`。不要和本机 systemd 抢端口。
+`--build` 按 `Dockerfile.console` 编镜像 `strikeagent-atkbrain-flash:console`，`--wait` 等到探活通过再返回。容器名是 `strikeagent-atkbrain-flash`（API）和 `strikeagent-atkbrain-caddy`（HTTPS）。
 
-忘入口或口令：再跑上面的 `panel`。若提示没有明文副本，在 `.env` 设 `ATKBRAIN_ADMIN_PASSWORD` 与 `ATKBRAIN_ADMIN_PASSWORD_RESET=1`，`docker compose up -d`，确认后再把 RESET 改回 `false`。
+```bash
+docker compose -f compose.yaml ps
+docker compose -f compose.yaml exec atkbrain python -m atkbrain.panel
+# 打印带随机入口的 https 登录地址和当前口令（只这台机器能看）
 
-本机不用 Docker：`sudo scripts/atkbrain-up.sh`。数据都在 `backend/data/`（gitignore），升级不覆盖。
+# 升级：在仓库根目录拉新代码后再编一次
+docker compose -f compose.yaml -f deploy/compose.build.yaml up -d --build --wait
+
+# 停
+docker compose -f compose.yaml -f deploy/compose.build.yaml down
+```
+
+### Linux 实例搭建
+
+在 Linux 上直接跑，不建容器。需要 root、systemd、Python 3.11+（`/usr/bin/python3`）、Node.js 20+、npm、openssl。服务单元写死用系统的 `python3`，依赖要装进这个解释器，不要只装进一个没被 unit 用到的 venv。
+
+Debian / Ubuntu：
+
+```bash
+sudo apt-get update
+sudo apt-get install -y python3 python3-pip python3-venv nodejs npm openssl ca-certificates \
+  gcc pkg-config libffi-dev \
+  libcairo2 libpango-1.0-0 libpangocairo-1.0-0 libgdk-pixbuf-2.0-0
+```
+
+RHEL / TencentOS：
+
+```bash
+sudo dnf install -y python3 python3-pip nodejs npm openssl ca-certificates gcc pkgconf-pkg-config libffi-devel cairo pango gdk-pixbuf2
+```
+
+发行版自带的 Node 若低于 20，先换成 Node.js 20 再继续。然后装本仓库的 Python 依赖、前端和 Pi：
+
+```bash
+git clone <本仓库 URL>
+cd StrikeAgent_AtkBrain-Flash
+cp .env.example .env
+
+python3 -m pip install -r backend/requirements.txt
+npm install -g @earendil-works/pi-coding-agent
+cd frontend && npm install && cd ..
+
+sudo scripts/atkbrain-up.sh
+```
+
+`atkbrain-up.sh` 会安装并拉起两个单元：
+
+- `atkbrain-flash-backend.service`：API，`2333`
+- `atkbrain-flash-frontend.service`：自签 HTTPS，`2334`，反代到 `2333`
+
+```bash
+scripts/atkbrain-panel.sh
+# 等价于：cd backend && python3 -m atkbrain.panel
+
+sudo scripts/atkbrain-backend.sh status
+sudo scripts/atkbrain-frontend.sh status
+sudo scripts/atkbrain-backend.sh logs
+sudo scripts/atkbrain-frontend.sh logs
+```
+
+日志也在 `backend/data/logs/backend.log` 和 `frontend.log`。
+
+升级时在仓库根目录拉新代码，再装一次依赖并重启。前端有改动时要重新构建：
+
+```bash
+python3 -m pip install -r backend/requirements.txt
+cd frontend && npm install && npm run build && cd ..
+sudo scripts/atkbrain-backend.sh restart
+sudo scripts/atkbrain-frontend.sh restart
+```
+
+停服务：`sudo scripts/atkbrain-backend.sh stop` 与 `sudo scripts/atkbrain-frontend.sh stop`。卸掉单元但保留数据：两个脚本都执行 `uninstall`。
+
+Docker 镜像里带了常用探测工具。Linux 实例只保证控制台和 Pi 能起来，猎面要调用的 `nmap` 等命令需要另外装在这台机器上，并出现在 root 的 `PATH` 里。
+
+### 起来之后
+
+用 panel 打印的 **https** 地址打开（自签证书点继续）。控制台是 `:2334`，API 是 `:2333`。裸 `:2334/` 是介绍页，登录地址带那段随机路径。
+
+首次用 `admin` / `admin` 进去，页面会要求马上改密。
+
+然后配置模型。打开控制台的 **设置 → Pi 模型**，编辑框里就是 Pi 的 `models.json`。改 `providers`（含 `apiKey`、接口地址、模型列表），再用 `defaultProvider` 和 `defaultModel` 指定猎面实际加载的那一个。保存后写入 `backend/data/pi-models.json`，之后拉起的 Pi 读这份文件。JSON 不合法会拒绝保存。
+
+忘了入口或口令：再跑对应搭法的 `panel`。若提示没有明文副本，在 `.env` 设 `ATKBRAIN_ADMIN_PASSWORD` 与 `ATKBRAIN_ADMIN_PASSWORD_RESET=1`。Docker 再执行一次对应系统的 `docker compose ... up -d`。Linux 实例再执行 `sudo scripts/atkbrain-backend.sh restart`。确认能登录后把 RESET 改回 `false`。
 
 ## 开源协议与免责声明
 
-**AGPL-3.0-only** — 个人和开源免费。商业许可：[gavenmiya@outlook.com](mailto:gavenmiya@outlook.com)。正文见 [LICENSE](LICENSE)。
+**AGPL-3.0-only** — 个人和开源免费。商业许可：[gavenmiya@outlook.com](mailto:gavenmiya@outlook.com)禁止一切未授权的商业行为。正文见 [LICENSE](LICENSE)。
 
 仅限已获明确授权的环境。使用即表示你已获得授权并自行承担后果。
 

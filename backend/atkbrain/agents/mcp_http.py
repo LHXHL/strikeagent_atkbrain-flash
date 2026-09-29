@@ -12,13 +12,8 @@ from .tools import mcp_tool_defs, mcp_tool_map
 
 
 async def _yakit_defs(ctx: AgentContext | None) -> list[dict]:
-    if ctx is None:
-        return []
-    try:
-        from ..proxy.yakit import yakit
-        return await yakit.hunter_tool_defs(objective=ctx.objective, project=ctx.project)
-    except Exception:
-        return []
+    del ctx
+    return []
 
 
 async def _yakit_names(pid: str) -> set[str]:

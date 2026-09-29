@@ -139,15 +139,15 @@ async def lifespan(app: FastAPI):
             pass
     autopilot_task = asyncio.create_task(_benchmark_autopilot_loop())
     try:
+        from .review.jobs import resume_pending_reviews
+        asyncio.create_task(resume_pending_reviews())
+    except Exception as e:
+        print(f"[startup] 续做未完成复核失败：{e}")
+    try:
         from .proxy.pool import pool as _proxy_pool
         _proxy_pool.ensure_loop()
     except Exception as e:
         print(f"[startup] 代理池后台任务失败：{e}")
-    try:
-        from .proxy.yakit import yakit as _yakit
-        await _yakit.startup()
-    except Exception as e:
-        print(f"[startup] Yakit 桥启动失败：{e}")
     yield
     autopilot_task.cancel()
     try:

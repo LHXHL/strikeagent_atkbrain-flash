@@ -39,6 +39,13 @@ class ForeignPublicHostTests(unittest.TestCase):
                 unauthorized_public_host(h, self.scope, primary="zenn.dev"), h,
             )
 
+    def test_code_attribute_not_host(self) -> None:
+        from ..scope import public_hosts_in_text
+        got = public_hosts_in_text("data = json.load(sys.stdin)")
+        self.assertNotIn("json.load", got)
+        self.assertNotIn("sys.stdin", got)
+        self.assertIn("example.com", public_hosts_in_text("curl https://example.com/"))
+
     def test_path_suffix_not_host(self) -> None:
         from ..scope import public_hosts_in_text
         got = public_hosts_in_text("http:zenn.dev:443/robots.txt")

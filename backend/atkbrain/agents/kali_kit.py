@@ -59,7 +59,7 @@ def kit_web(repo_root: str) -> str:
 - Host 碰撞：`/usr/bin/gobuster vhost -u http://<ip> --append-domain -w {WL_DNS}`；或 `/usr/bin/ffuf -u http://<ip>/ -H 'Host: FUZZ.<domain>' -w {WL_DNS}`。
 - JS 接口：`python3 {jsfinder} -u <url> -ou js_urls.txt -os js_subs.txt`（仓库 tools/，禁止 which jsfinder）。
 - 40x 绕过：已确认 401/403 后 `bash {bypass} http://<host> <path>`（iamj0ker/bypass-403；禁止 which bypass-403）。Payload 被 WAF/拦截页拦住时读 skill `waf-bypass-methodology`。
-- 账号密码：`/usr/bin/hydra`（用户 `-L` 密码 `-P`）。一律禁止 `{WL_ROCKYOU}` 与 hashcat 全库。
+- 账号密码：CTF 可用 `/usr/bin/hydra`（用户 `-L` 密码 `-P`）。红队/SRC 禁止 hydra、medusa、ncrack、patator，守卫会拒绝。一律禁止 `{WL_ROCKYOU}` 与 hashcat 全库。
   - 小：`-L {WL_USER_SMALL} -P {WL_PASS_SMALL}`；HTTP 默认对 `{WL_HTTP_DEFAULT}`
   - 中：`-P {WL_PASS_MED}`
   - 大（未超 10 万，红队可用；CTF 不要升到这档）：`-P {WL_PASS_LARGE}`
@@ -74,7 +74,7 @@ KIT_EXTRA_WEB = f"""# 已装备选（绝对路径；目录默认仍 ffuf，不�
 - 目录备选（同一套小/中词表，禁止超 10 万行；ffuf 失败或缺扩展名规则时才换）：
   `/usr/bin/gobuster dir -u http://<host>/ -w {WL_DIR_MED}`；`/usr/bin/feroxbuster -u http://<host>/ -w {WL_DIR_MED}`；`/usr/bin/dirb http://<host>/ {WL_DIR_SMALL}`；`/usr/bin/wfuzz -c -z file,{WL_DIR_MED} --hc 404 http://<host>/FUZZ`
 - Web：`/usr/bin/nikto -h <url>`（仅已确认 HTTP 面）；`/usr/bin/httpx -u <url> -title -status-code -silent`（探活/标题）；nuclei 扫模板；wafw00f 识别 WAF。
-- 口令：`/usr/bin/hydra`、`/usr/bin/medusa`、`/usr/bin/ncrack`、`/usr/sbin/john`、`/usr/bin/hashcat`。词表仍走小/中/大（大档 88406，未超 10 万）。禁止 rockyou 与 hashcat 全库。
+- 口令：CTF 可用 `/usr/bin/hydra`、`/usr/bin/medusa`、`/usr/bin/ncrack`。红队/SRC 禁止这三者和 patator。`/usr/sbin/john`、`/usr/bin/hashcat` 仍受 10 万行词表限制。禁止 rockyou 与 hashcat 全库。
 - 其它 Web 相关：`/usr/bin/dig`、`/usr/bin/amass`、`/usr/bin/theHarvester`、`/usr/bin/cewl`、`/usr/bin/searchsploit`、`/usr/bin/proxychains4`、`/usr/bin/msfconsole`。
 """
 
@@ -130,14 +130,7 @@ def commander_kit(repo_root: str | None = None, *, objective: str | None = None)
     """清单正文（无 YAML）。objective 忽略：目录对 CTF/红队共用，策略在 recon skill。"""
     del objective
     root = repo_root if repo_root is not None else str(REPO_ROOT)
-    parts = [KIT_RULES]
-    try:
-        from ..proxy.yakit import yakit
-        if yakit.enabled:
-            parts.append(KIT_YAKIT)
-    except Exception:
-        pass
-    parts.extend([kit_web(root), KIT_EXTRA_WEB, KIT_EXTRA_LATERAL, KIT_BIN])
+    parts = [KIT_RULES, kit_web(root), KIT_EXTRA_WEB, KIT_EXTRA_LATERAL, KIT_BIN]
     return "\n".join(parts).strip() + "\n"
 
 

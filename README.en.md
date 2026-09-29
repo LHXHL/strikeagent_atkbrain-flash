@@ -24,7 +24,7 @@ The team’s private Pro build has already shipped on dozens of programs and wel
 
 ## Architecture
 
-The console schedules hunts; the attack graph drives the self-loop. The servant finishes a full round before asking the master. A human message in chat interrupts the current round. Runtime is Pi (`deepseek-flash`). For red team / blue team/SRC, the first HTTP hop is local Yakit MITM; the next hop is the egress proxy pool.
+The console schedules hunts; the attack graph drives the self-loop. The servant finishes a full round before asking the master. A human message in chat interrupts the current round. Runtime is Pi. Which model it loads is set in the settings JSON. Red team / blue team/SRC egress is the real IP unless the imported proxy pool is turned on.
 
 ![StrikeAgent_AtkBrain-Flash architecture](docs/assets/architecture.png)
 
@@ -78,25 +78,114 @@ An unauthorized visitor does not get a login page, an API, or a password on the 
 
 ## Environment and install
 
-Docker on Kali (host network):
+Pick one. Docker packs the console, Pi, and the usual probe tools into an image. A Linux install runs on the machine under systemd and does not use a container. Do not run both at once; they both bind `2333` and `2334`.
+
+The model is not chosen at install time. After the console is up, set it in the Pi JSON on the settings page. `.env` is only for the local password and ports. Do not put a provider key there. Data lives in `backend/data/` (gitignored). Image upgrades and service reinstalls do not overwrite the database, the entrance file, or the saved model JSON.
+
+### Docker
+
+Docker and the Docker Compose plugin. Run this from the repo root (the directory that contains `compose.yaml` and `.env.example`). Linux uses host networking, so the browser must be able to reach port `2334` on that host. Docker Desktop on macOS has no host network, so add `deploy/compose.mac.yaml`. That bind is `127.0.0.1` only.
 
 ```bash
 git clone <this repo URL>
 cd StrikeAgent_AtkBrain-Flash
-# Enter the repo root (the directory that contains compose.yaml and .env.example)
 cp .env.example .env
-# Edit .env: set DEEPSEEK_API_KEY=your key (hunts need it; console still starts without it)
+# Leave .env at the defaults. First login is admin / admin, then you must change the password.
+# Do not put a model key here.
+
+# Linux
 docker compose -f compose.yaml -f deploy/compose.build.yaml up -d --build --wait
-# Build the image, start the container, return after healthcheck
-docker compose exec atkbrain python -m atkbrain.panel
-# Print the https login URL with the random entrance, and the current password (host shell only)
+
+# macOS
+# docker compose -f compose.yaml -f deploy/compose.build.yaml -f deploy/compose.mac.yaml up -d --build --wait
 ```
 
-Open the **https** URL `panel` prints (accept the self-signed cert). First login is `admin` / `admin`; you must change it. Console `:2334`, API `:2333`. Do not fight local systemd for those ports.
+`--build` builds `strikeagent-atkbrain-flash:console` from `Dockerfile.console`. `--wait` returns after the healthcheck. The containers are `strikeagent-atkbrain-flash` (API) and `strikeagent-atkbrain-caddy` (HTTPS).
 
-Forgot the URL or password: run `panel` again. If it says there is no plaintext copy, set `ATKBRAIN_ADMIN_PASSWORD` and `ATKBRAIN_ADMIN_PASSWORD_RESET=1` in `.env`, then `docker compose up -d`; set RESET back to `false` afterwards.
+```bash
+docker compose -f compose.yaml ps
+docker compose -f compose.yaml exec atkbrain python -m atkbrain.panel
+# Print the https login URL (random entrance) and the current password. Host shell only.
 
-Without Docker: `sudo scripts/atkbrain-up.sh`. Data lives in `backend/data/` (gitignored); upgrades do not overwrite it.
+# Upgrade: pull, then build again from the repo root
+docker compose -f compose.yaml -f deploy/compose.build.yaml up -d --build --wait
+
+# Stop
+docker compose -f compose.yaml -f deploy/compose.build.yaml down
+```
+
+### Linux install
+
+Runs on the host. No container. You need root, systemd, Python 3.11+ as `/usr/bin/python3`, Node.js 20+, npm, and openssl. The service unit calls system `python3`, so install the Python packages into that interpreter. A venv the unit does not use will not be picked up.
+
+Debian / Ubuntu:
+
+```bash
+sudo apt-get update
+sudo apt-get install -y python3 python3-pip python3-venv nodejs npm openssl ca-certificates \
+  gcc pkg-config libffi-dev \
+  libcairo2 libpango-1.0-0 libpangocairo-1.0-0 libgdk-pixbuf-2.0-0
+```
+
+RHEL / TencentOS:
+
+```bash
+sudo dnf install -y python3 python3-pip nodejs npm openssl ca-certificates gcc pkgconf-pkg-config libffi-devel cairo pango gdk-pixbuf2
+```
+
+If the distro Node is older than 20, install Node.js 20 before continuing. Then install this repo's Python packages, the frontend, and Pi:
+
+```bash
+git clone <this repo URL>
+cd StrikeAgent_AtkBrain-Flash
+cp .env.example .env
+
+python3 -m pip install -r backend/requirements.txt
+npm install -g @earendil-works/pi-coding-agent
+cd frontend && npm install && cd ..
+
+sudo scripts/atkbrain-up.sh
+```
+
+`atkbrain-up.sh` installs and starts two units:
+
+- `atkbrain-flash-backend.service`: API on `2333`
+- `atkbrain-flash-frontend.service`: self-signed HTTPS on `2334`, proxied to `2333`
+
+```bash
+scripts/atkbrain-panel.sh
+# same as: cd backend && python3 -m atkbrain.panel
+
+sudo scripts/atkbrain-backend.sh status
+sudo scripts/atkbrain-frontend.sh status
+sudo scripts/atkbrain-backend.sh logs
+sudo scripts/atkbrain-frontend.sh logs
+```
+
+Logs are also in `backend/data/logs/backend.log` and `frontend.log`.
+
+To upgrade, pull at the repo root, reinstall dependencies, and restart. Rebuild the frontend when it changed:
+
+```bash
+python3 -m pip install -r backend/requirements.txt
+cd frontend && npm install && npm run build && cd ..
+sudo scripts/atkbrain-backend.sh restart
+sudo scripts/atkbrain-frontend.sh restart
+```
+
+Stop with `sudo scripts/atkbrain-backend.sh stop` and `sudo scripts/atkbrain-frontend.sh stop`. `uninstall` on both scripts removes the units and leaves the data directory in place.
+
+The Docker image includes the usual probe tools. A Linux install only brings up the console and Pi. Commands the hunt calls, such as `nmap`, must be installed on the host and be on root's `PATH`.
+
+### After it is up
+
+Open the **https** URL `panel` prints and accept the self-signed certificate. The console is `:2334`. The API is `:2333`. Bare `:2334/` is the product page. The login URL includes the random path.
+
+Sign in as `admin` / `admin`. The page requires a new password immediately.
+
+Then set the model. In the console open **Settings → Pi models**. The text box is Pi's `models.json`. Edit `providers` (including `apiKey`, base URL, and the model list), then set `defaultProvider` and `defaultModel` to the one hunts should load. Saving writes `backend/data/pi-models.json`. Later Pi processes read that file. Invalid JSON is rejected.
+
+Forgot the URL or password: run `panel` for the install you used. If it says there is no plaintext copy, set `ATKBRAIN_ADMIN_PASSWORD` and `ATKBRAIN_ADMIN_PASSWORD_RESET=1` in `.env`. On Docker, run the same `docker compose ... up -d` again. On a Linux install, run `sudo scripts/atkbrain-backend.sh restart`. Set RESET back to `false` after you can sign in.
 
 ## License and disclaimer
 

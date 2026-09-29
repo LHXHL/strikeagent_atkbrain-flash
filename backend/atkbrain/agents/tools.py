@@ -1238,7 +1238,8 @@ def build_atkbrain_tools(ctx: AgentContext) -> list:
     @tool(
         "report_finding",
         "上报一个漏洞。必须先验证真实性：evidence 或可复现 PoC 缺一不可，否则记为未验证。"
-        "二次验证与红队评级可以分开写：首次上报两者都不填；只交二次则 secondary_verified=true 加至少 40 字怎么再打的；"
+        "二次验证与红队评级可以分开写：首次上报两者都不填；只交二次则必须独立再看到同样危害才 secondary_verified=true，并写至少 40 字这次新看到了什么；"
+        "没证明则 verification_status=excluded 且 secondary_verified=false，排除只针对这一条。"
         "只交评级则 redteam_rating 加至少 40 字为何这个级；两者都交则三者齐全。"
         "漏洞页五段 report_summary/report_impact/report_rating/report_repro/report_fix 由专职撰稿补，复核员不要写。"
         "五段人可见文字必须跟系统提示末尾的 OUTPUT_LANG / 输出语言契约一致。"
@@ -1260,9 +1261,14 @@ def build_atkbrain_tools(ctx: AgentContext) -> list:
                 "poc_curl": {"type": "string", "description": "可手工复现的 curl（真实请求，禁止占位）"},
                 "poc_python": {"type": "string", "description": "可手工复现的 python"},
                 "cvss": {"type": "number"},
+                "verification_status": {
+                    "type": "string",
+                    "enum": ["pending", "verified", "excluded"],
+                    "description": "二次没有独立证明同样危害时填 excluded，且 secondary_verified=false。排除只表示这一条没被证明，不是否定这类漏洞",
+                },
                 "secondary_verified": {
                     "type": "boolean",
-                    "description": "二次验证是否已完成。仅首次观测则 false。只做二次验证时为 true，并写理由；不要为了过门去填评级",
+                    "description": "只有独立再打并看到同样危害才为 true。没证明则为 false，并把 verification_status 设为 excluded",
                 },
                 "redteam_rating": {
                     "type": "string",
@@ -1342,6 +1348,7 @@ def build_atkbrain_tools(ctx: AgentContext) -> list:
             _truthy(args.get("secondary_verified")),
             args.get("redteam_rating"),
             args.get("redteam_rating_rationale"),
+            status=args.get("verification_status"),
         )
         if pair_err:
             return _text(f"⛔ {pair_err}", is_error=True)
@@ -1354,6 +1361,7 @@ def build_atkbrain_tools(ctx: AgentContext) -> list:
             proof_type=args.get("proof_type"), proof_canary=args.get("proof_canary"),
             proof_url=args.get("proof_url"), proof_detail=args.get("proof_detail"),
             finding_id=args.get("finding_id"),
+            verification_status=args.get("verification_status"),
             secondary_verified=_truthy(args.get("secondary_verified")),
             redteam_rating=args.get("redteam_rating"),
             redteam_rating_rationale=args.get("redteam_rating_rationale"),

@@ -30,8 +30,8 @@ _MSG = {
     "missing": {"zh": "未采集", "en": "Not collected"},
     "auth_fail": {"zh": "验证失败", "en": "Verification failed"},
     "llm_key_missing": {
-        "zh": "未配置 DEEPSEEK_API_KEY（或 ANTHROPIC_AUTH_TOKEN）。在项目目录 .env 填写后执行 docker compose up -d，再启动猎面。",
-        "en": "DEEPSEEK_API_KEY (or ANTHROPIC_AUTH_TOKEN) is not set. Put it in the project .env, run docker compose up -d, then start the hunt.",
+        "zh": "未配置大模型密钥。在设置 → Pi 模型里把 apiKey 写成真实密钥并保存，或在项目目录 .env 填写 DEEPSEEK_API_KEY 后执行 docker compose up -d。",
+        "en": "No model API key. Paste a real apiKey under Settings → Pi models and save, or set DEEPSEEK_API_KEY in the project .env and run docker compose up -d.",
     },
     "password_wrong": {"zh": "口令错误", "en": "Wrong password"},
     "review_busy": {"zh": "该漏洞这项复核正在进行", "en": "This finding already has that review running"},
@@ -53,9 +53,14 @@ _MSG = {
         "zh": "硬停：满 {turns} 轮或墙钟满 {cap}，记失败。已验证高危/严重不停工。",
         "en": "Hard stop: {turns} rounds or a {cap} wall clock marks failure. Verified high/critical does not stop the hunt.",
     },
+    "hs.empty_rounds": {
+        "zh": "连续 {n} 轮没有新节点也没有新漏洞 → 记失败",
+        "en": "{n} rounds in a row with no new node and no new finding → mark failed",
+    },
+    "hs.manual": {"zh": "手动停止", "en": "Manual stop"},
     "hs.src_label": {
-        "zh": "硬停：墙钟满 {cap}，记失败。已验证高危/严重不停工。不限轮次。",
-        "en": "Hard stop: {cap} wall clock marks failure. Verified high/critical does not stop the hunt. No turn cap.",
+        "zh": "硬停：墙钟满 {cap}，或连续 {n} 轮没有新节点也没有新漏洞。其余只接受手动停止。",
+        "en": "Hard stop: {cap} wall clock, or {n} rounds with no new node and no new finding. Otherwise only a manual stop.",
     },
     "hs.ctf_wall": {"zh": "本遍墙钟满 {cap} → 记失败", "en": "This pass’s wall clock hits {cap} → mark failed"},
     "hs.ctf_idle": {
@@ -79,8 +84,8 @@ _MSG = {
         "en": "After ring 3, {n} rounds with no high-quality progress in a row → pause, can resume",
     },
     "hs.red_label": {
-        "zh": "硬停：墙钟满 {cap}，记失败。拿到 shell 提前收工。不限轮次。",
-        "en": "Hard stop: {cap} wall clock marks failure. A shell finishes early. No turn cap.",
+        "zh": "硬停：墙钟满 {cap}，或连续 {n} 轮没有新节点也没有新漏洞。拿到 shell 提前收工。其余只接受手动停止。",
+        "en": "Hard stop: {cap} wall clock, or {n} rounds with no new node and no new finding. A shell finishes early. Otherwise only a manual stop.",
     },
 }
 

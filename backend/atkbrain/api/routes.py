@@ -162,16 +162,12 @@ class ProxyEnableReq(BaseModel):
     enabled: bool
 
 
-class YakitEnableReq(BaseModel):
-    enabled: bool
-
-
-class YakitBackupReq(BaseModel):
-    backup_text: str = ""
-
-
 class ProxyPoolReq(BaseModel):
     custom_text: str = ""
+
+
+class PiModelsReq(BaseModel):
+    text: str = ""
 
 
 class ReviewFlagsReq(BaseModel):
@@ -267,19 +263,12 @@ async def health(request: Request):
         else:
             claude_sdk = {"state": "unavailable", "label": "Pi 不可用", "error": str(exc)[:160]}
     from ..agents.brief_creds import CREDS_MODE
-    yakit_snap: dict = {}
-    try:
-        from ..proxy.yakit import yakit as _yakit
-        yakit_snap = await _yakit.status(force=False)
-    except Exception as e:
-        yakit_snap = {"enabled": False, "error": str(e)[:160], "engine": {"ready": False, "label": "Yakit 未就绪"}, "cert": {"ready": False, "label": "证书异常"}}
     return {
         "ok": True,
         "version": local_version(),
         "creds_mode": CREDS_MODE,
         "claude_sdk": claude_sdk,
         "proxy": _proxy_snap(),
-        "yakit": yakit_snap,
         **manager.snapshot(),
     }
 
@@ -335,16 +324,9 @@ async def apply_version(request: Request):
 
 @router.get("/settings")
 async def get_settings():
-    yakit_snap: dict = {}
-    try:
-        from ..proxy.yakit import yakit as _yakit
-        yakit_snap = await _yakit.status(force=False)
-    except Exception as e:
-        yakit_snap = {"error": str(e)[:160]}
     return {
         "concurrency": manager.snapshot(),
         "proxy": _proxy_snap(),
-        "yakit": yakit_snap,
         "defaults": {
             "model": settings.claude_model,
             "supervisor_model": (settings.supervisor_model or settings.claude_model),
@@ -356,10 +338,6 @@ async def get_settings():
                 "flag": hunt_hard_stop_info("flag"),
             },
             "hunt_clocks": _hunt_clocks(),
-            "yakit_mitm_host": getattr(settings, "yakit_mitm_host", "127.0.0.1"),
-            "yakit_mitm_port": int(getattr(settings, "yakit_mitm_port", 8084) or 8084),
-            "yakit_mcp_url": getattr(settings, "yakit_mcp_url", "http://127.0.0.1:11432/mcp"),
-            "yakit_mitm_ctf": bool(getattr(settings, "yakit_mitm_ctf", False)),
         },
         "review": _review_flags(),
     }
@@ -441,49 +419,20 @@ async def api_proxy_verify():
     return await pool.verify()
 
 
-@router.get("/yakit/status")
-async def api_yakit_status():
-    from ..proxy.yakit import yakit
-    return await yakit.status(force=False)
+@router.get("/settings/pi-models")
+async def api_pi_models_get():
+    from ..agents.pi_runtime import pi_models_text
+    return {"text": pi_models_text()}
 
 
-@router.post("/yakit/enabled")
-async def api_yakit_enabled(req: YakitEnableReq):
-    from ..proxy.yakit import yakit
-    return await yakit.set_enabled(bool(req.enabled))
-
-
-@router.post("/yakit/backup")
-async def api_yakit_backup(req: YakitBackupReq):
-    from ..proxy.yakit import yakit
-    return await yakit.set_backup_text(req.backup_text or "")
-
-
-@router.post("/yakit/cert")
-async def api_yakit_cert_download():
-    from ..proxy.yakit import cert_path, yakit
+@router.post("/settings/pi-models")
+async def api_pi_models_set(req: PiModelsReq):
+    from ..agents.pi_runtime import save_pi_models_text
     try:
-        path = await yakit.ensure_cert(force=True)
-    except Exception as e:
-        raise HTTPException(502, f"下载 MITM 证书失败：{e}")
-    yakit._status_cache = None
-    yakit._decrypt_ok = None
-    snap = await yakit.status(force=True)
-    snap["cert_saved"] = str(path)
-    return snap
-
-
-@router.get("/yakit/cert")
-async def api_yakit_cert_file():
-    from ..proxy.yakit import cert_path
-    p = cert_path()
-    if not p.is_file():
-        raise HTTPException(404, "尚未下载 MITM 证书")
-    return Response(
-        content=p.read_bytes(),
-        media_type="application/x-pem-file",
-        headers={"Content-Disposition": 'attachment; filename="yakit-mitm-ca.pem"'},
-    )
+        save_pi_models_text(req.text or "")
+    except ValueError as e:
+        raise HTTPException(400, str(e))
+    return {"ok": True, "text": req.text or ""}
 
 
 def _slim_list_config(cfg: dict | None) -> dict:
@@ -1272,16 +1221,13 @@ async def api_finding_review(pid: str, fid: str, req: FindingReviewReq):
 async def api_finding_detail(pid: str, fid: str):
     """单漏洞全量详情（不截断），供漏洞弹层。非 rejected 均可查看。"""
     finding, p, _related = await _load_reportable_finding(pid, fid)
-    from ..review.flags import get_review_flags
-    from ..report.pi_finding_page import ensure_pi_page, has_pi_page
-    if finding.get("secondary_verified") or not get_review_flags()["secondary_verify"]:
-        if not has_pi_page(finding):
-            finding = await ensure_pi_page(pid, finding, project=p)
-            finding, p, _related = await _load_reportable_finding(pid, fid)
     target = _project_http_target(p)
     poc = poc_for_finding(finding, target)
     finding = prepare_finding_report(finding, poc=poc)
     finding["poc"] = poc
+    if finding.get("report_state") == "writing":
+        from ..report.pi_finding_page import schedule_pi_page
+        schedule_pi_page(pid, fid)
     return finding
 
 
@@ -1292,12 +1238,6 @@ async def api_finding_report(pid: str, fid: str, format: str = Query("md"), lang
         raise HTTPException(400, msg("format_md"))
     loc = normalize_locale(lang or get_locale())
     finding, p, _related = await _load_reportable_finding(pid, fid)
-    from ..review.flags import get_review_flags
-    from ..report.pi_finding_page import ensure_pi_page, has_pi_page
-    if finding.get("secondary_verified") or not get_review_flags()["secondary_verify"]:
-        if not has_pi_page(finding):
-            finding = await ensure_pi_page(pid, finding, project=p)
-            finding, p, _related = await _load_reportable_finding(pid, fid)
     target = _project_http_target(p)
     poc = poc_for_finding(finding, target)
     body = render_finding_markdown(p, finding, poc=poc, lang=loc)

@@ -88,12 +88,24 @@ async def verify_finding(
     return VerifyResult(status="verified", reason="accepted", **base)
 
 
+_SECONDARY_FAIL = (
+    "未复现", "未能复现", "无法复现", "没有复现", "打不出",
+    "未观察到", "未能证明", "没有证明", "未看到同样", "假阳性",
+)
+
+
+def secondary_claim_failed(rationale: str | None) -> bool:
+    """复核自述没有打出同样危害时，不能记成二次验证通过。"""
+    text = str(rationale or "")
+    return any(p in text for p in _SECONDARY_FAIL)
+
+
 def is_visible_finding(row: dict | Any) -> bool:
-    """用户可见发现：非 rejected 即展示。"""
+    """用户可见发现：rejected 隐藏；excluded 仍展示，只是这一条标成排除。"""
     try:
         st = row["verification_status"] if not isinstance(row, dict) else row.get("verification_status")
     except (KeyError, TypeError, IndexError):
         st = None
     if st is None or st == "":
         return True
-    return str(st).lower() in ("verified", "flaky", "pending")
+    return str(st).lower() in ("verified", "flaky", "pending", "excluded")

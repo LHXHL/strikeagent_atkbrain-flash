@@ -16,6 +16,7 @@ _LOCKS: dict[str, asyncio.Lock] = {}
 PAGE_KEYS = ("report_summary", "report_impact", "report_rating", "report_repro", "report_fix")
 
 PENDING_COPY = "专职复核 Pi 完成二次验证与红队评级后撰写本段，不使用模板套话。"
+WRITING_COPY = "专职 Pi 正在撰写漏洞页…"
 
 
 def _page_system(project: dict | None) -> str:
@@ -221,6 +222,41 @@ async def ensure_pi_page(
             await save_pi_page(fid, spec)
             out.update(spec)
     return out
+
+
+_SCHEDULED: set[str] = set()
+
+
+def schedule_pi_page(project_id: str, fid: str) -> None:
+    """二次已完成但五段还空时补写。同一条只挂一个任务。"""
+    if not project_id or not fid or fid in _SCHEDULED:
+        return
+    _SCHEDULED.add(fid)
+
+    async def _run() -> None:
+        try:
+            row = await db.fetchone(
+                "SELECT * FROM findings WHERE id=? AND project_id=?",
+                (fid, project_id),
+            )
+            if not row:
+                return
+            data = dict(row)
+            if has_pi_page(data):
+                return
+            from ..review.flags import get_review_flags
+            if not data.get("secondary_verified") and get_review_flags()["secondary_verify"]:
+                return
+            from ..projects import get_project
+            proj = await get_project(project_id)
+            await ensure_pi_page(project_id, data, project=proj)
+        finally:
+            _SCHEDULED.discard(fid)
+
+    try:
+        asyncio.get_running_loop().create_task(_run())
+    except RuntimeError:
+        _SCHEDULED.discard(fid)
 
 
 async def fill_missing_pi_pages(project_id: str, *, project: dict | None = None) -> int:

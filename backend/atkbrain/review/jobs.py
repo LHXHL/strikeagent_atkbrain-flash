@@ -2,6 +2,7 @@
 from __future__ import annotations
 
 import asyncio
+import os
 import time
 import uuid
 from typing import Any
@@ -48,13 +49,103 @@ def list_active() -> list[dict[str, Any]]:
     return out
 
 
+_WAIT_DETAILS = {"已拉起 Pi，等待模型", "等待模型回复"}
+
+
+def _pid_alive(pid: int) -> bool:
+    if pid <= 0:
+        return False
+    try:
+        os.kill(pid, 0)
+    except OSError:
+        return False
+    return True
+
+
+def note_review_pid(job_id: str, pid: int) -> None:
+    job = _JOBS.get(job_id)
+    if not job or pid <= 0:
+        return
+    job["pi_pid"] = int(pid)
+
+
+def pulse_review(job_id: str) -> None:
+    """进程还在等模型时刷新时间。不把正在调用的工具盖掉。"""
+    job = _JOBS.get(job_id)
+    if not job or job.get("status") != "running":
+        return
+    job["updated_at"] = time.time()
+    cur = str(job.get("detail") or "")
+    if not cur or cur in _WAIT_DETAILS:
+        job["detail"] = "等待模型回复"
+
+
+def note_review_beat(job_id: str, detail: str) -> None:
+    """Pi 已经在跑时刷新动作。排队中的任务不因心跳变成进行中。"""
+    job = _JOBS.get(job_id)
+    if not job or job.get("status") != "running":
+        return
+    text = str(detail or "").strip()
+    if not text:
+        return
+    job["detail"] = text[:80]
+    job["updated_at"] = time.time()
+
+
+def mark_running(job_id: str, detail: str) -> None:
+    job = _JOBS.get(job_id)
+    if not job or job.get("status") not in ("queued", "running"):
+        return
+    now = time.time()
+    job["status"] = "running"
+    if not job.get("started_at"):
+        job["started_at"] = now
+    text = str(detail or "").strip()
+    if text:
+        job["detail"] = text[:80]
+    job["updated_at"] = now
+
+
+def review_state(pid: str, fid: str) -> dict[str, dict[str, Any]]:
+    """这条漏洞上二次验证 / 红队评级各自的真实状态。排队和进行中分开。"""
+    out: dict[str, dict[str, Any]] = {}
+    now = time.time()
+    for (p, f, m), jid in list(_ACTIVE.items()):
+        if p != pid or f != fid:
+            continue
+        job = _JOBS.get(jid)
+        if not job or job.get("status") not in ("queued", "running"):
+            continue
+        modes = ["secondary", "rating"] if m == "both" else [m]
+        created = float(job.get("created_at") or now)
+        started = float(job.get("started_at") or 0) or created
+        updated = float(job.get("updated_at") or created)
+        status = str(job.get("status") or "")
+        detail = str(job.get("detail") or "")
+        pi_pid = int(job.get("pi_pid") or 0)
+        if status == "running" and pi_pid and not _pid_alive(pi_pid):
+            status = "dead"
+            detail = "Pi 进程已退出"
+            release(jid, status="error", error="pi exited")
+        view = {
+            "status": status,
+            "started_at": started if status == "running" else created,
+            "updated_at": updated,
+            "detail": detail,
+        }
+        for mode in modes:
+            if mode in ("secondary", "rating"):
+                out[mode] = view
+    return out
+
+
 def reviewing_modes(pid: str, fid: str) -> set[str]:
     modes: set[str] = set()
     for (p, f, m), jid in _ACTIVE.items():
         if p != pid or f != fid:
             continue
         job = _JOBS.get(jid)
-        if not job or job.get("status") not in ("queued", "running"):
+        if not job or job.get("status") != "running":
             continue
         if m == "both":
             modes.add("secondary")
@@ -80,8 +171,10 @@ def claim(pid: str, fid: str, mode: str, *, source: str = "manual") -> dict[str,
         "source": source,
         "status": "queued",
         "error": "",
+        "detail": "排队，尚未拉起 Pi",
         "created_at": time.time(),
         "updated_at": time.time(),
+        "started_at": 0.0,
     }
     _JOBS[jid] = job
     _ACTIVE[(pid, fid, mode)] = jid
@@ -127,50 +220,219 @@ def live_hunt_agent(pid: str) -> Any | None:
     return agent
 
 
-async def _run_on_live(agent: Any, finding: dict, mode: str) -> None:
-    await agent.review_one(finding, mode)
+async def _run_on_live(agent: Any, finding: dict, mode: str, job_id: str = "") -> None:
+    await agent.review_one(finding, mode, job_id=job_id)
 
 
-async def _run_idle(project: dict, finding: dict, mode: str) -> None:
+async def _run_idle(project: dict, finding: dict, mode: str, job_id: str = "") -> None:
     from ..agents.session import ProjectAgent
     from ..projects import build_scope
 
     pid = str(project.get("id") or "")
-    async with _idle_lock(pid):
-        live = live_hunt_agent(pid)
-        if live is not None:
-            await _run_on_live(live, finding, mode)
-            return
-        agent = ProjectAgent(project, build_scope(project))
-        agent._owns_mcp = True
+    live = live_hunt_agent(pid)
+    if live is not None:
+        await _run_on_live(live, finding, mode, job_id)
+        return
+    agent = ProjectAgent(project, build_scope(project))
+    agent._owns_mcp = True
+    try:
+        await agent.connect()
+        await agent.review_one(finding, mode, job_id=job_id)
+    finally:
+        live_now = live_hunt_agent(pid)
+        if live_now is not None and live_now is not agent:
+            agent._owns_mcp = False
         try:
-            await agent.connect()
-            await agent.review_one(finding, mode)
-        finally:
-            live_now = live_hunt_agent(pid)
-            if live_now is not None and live_now is not agent:
-                agent._owns_mcp = False
-            try:
-                await agent.close()
-            except Exception:
-                pass
+            await agent.close()
+        except Exception:
+            pass
 
 
 async def _execute(job_id: str, project: dict, finding: dict, mode: str) -> None:
-    job = _JOBS.get(job_id)
-    if job:
-        job["status"] = "running"
-        job["updated_at"] = time.time()
     pid = str(project.get("id") or "")
     try:
         live = live_hunt_agent(pid)
         if live is not None:
-            await _run_on_live(live, finding, mode)
+            await _run_on_live(live, finding, mode, job_id)
         else:
-            await _run_idle(project, finding, mode)
+            await _run_idle(project, finding, mode, job_id)
         release(job_id, status="done")
     except Exception as e:
         release(job_id, status="error", error=str(e)[:240])
+
+
+_DRAINING: set[str] = set()
+_DRAIN_SEM = asyncio.Semaphore(2)
+# 同一条、同一种复核连续没写回库，就先搁下，换下一条。避免一条卡死整队。
+REVIEW_ATTEMPT_CAP = 3
+
+
+def review_attempt_key(fid: str, mode: str) -> tuple[str, str]:
+    return (str(fid or ""), str(mode or "both"))
+
+
+def review_attempt_open(attempts: dict[tuple[str, str], int], fid: str, mode: str) -> bool:
+    key = review_attempt_key(fid, mode)
+    try:
+        n = int(attempts.get(key, 0) or 0)
+    except (TypeError, ValueError):
+        n = 0
+    return n < REVIEW_ATTEMPT_CAP
+
+
+def note_review_attempt(attempts: dict[tuple[str, str], int], fid: str, mode: str) -> int:
+    key = review_attempt_key(fid, mode)
+    try:
+        n = int(attempts.get(key, 0) or 0) + 1
+    except (TypeError, ValueError):
+        n = 1
+    attempts[key] = n
+    return n
+
+
+def schedule_drain(project: dict | None) -> None:
+    """猎停后或启动时，把还没二次验证/没评级的漏洞一条条做完。不在关机时新开 Pi。"""
+    if not isinstance(project, dict):
+        return
+    pid = str(project.get("id") or "")
+    if not pid or pid in _DRAINING:
+        return
+    try:
+        from ..engine.scheduler import manager
+        if getattr(manager, "shutting_down", False):
+            return
+    except Exception:
+        return
+    live = live_hunt_agent(pid)
+    if live is not None:
+        kick = getattr(live, "_kick_review", None)
+        if callable(kick):
+            try:
+                kick()
+            except Exception:
+                pass
+        return
+    try:
+        loop = asyncio.get_running_loop()
+    except RuntimeError:
+        return
+    _DRAINING.add(pid)
+    loop.create_task(_drain(project))
+
+
+async def _drain(project: dict) -> None:
+    from ..graph.store import findings_pending_review
+
+    pid = str(project.get("id") or "")
+    attempts: dict[tuple[str, str], int] = {}
+    try:
+        async with _DRAIN_SEM:
+            while True:
+                try:
+                    from ..engine.scheduler import manager
+                    if getattr(manager, "shutting_down", False):
+                        return
+                except Exception:
+                    pass
+                live = live_hunt_agent(pid)
+                if live is not None:
+                    kick = getattr(live, "_kick_review", None)
+                    if callable(kick):
+                        try:
+                            kick()
+                        except Exception:
+                            pass
+                    return
+                try:
+                    pending = await findings_pending_review(pid)
+                except Exception:
+                    return
+                item = None
+                mode = ""
+                for f in pending:
+                    fid = str(f.get("id") or "")
+                    raw = str(f.get("_review_mode") or "both")
+                    modes = ["secondary", "rating"] if raw == "both" else [raw]
+                    picked = ""
+                    for cand in modes:
+                        if cand in ("secondary", "rating") and review_attempt_open(attempts, fid, cand):
+                            picked = cand
+                            break
+                    if not fid or not picked:
+                        continue
+                    item = f
+                    mode = picked
+                    break
+                if item is None or not mode:
+                    return
+                fid = str(item.get("id") or "")
+                job = try_claim(pid, fid, mode, source="auto")
+                if job is None:
+                    note_review_attempt(attempts, fid, mode)
+                    continue
+                one = dict(item)
+                one["_review_mode"] = mode
+                one["_job_id"] = job["id"]
+                try:
+                    await _run_idle(project, one, mode, job["id"])
+                    release(job["id"], status="done")
+                except Exception as e:
+                    release(job["id"], status="error", error=str(e)[:240])
+                still = []
+                try:
+                    still = await findings_pending_review(pid)
+                except Exception:
+                    still = []
+                still_needs = False
+                for row in still:
+                    if str(row.get("id") or "") != fid:
+                        continue
+                    need = str(row.get("_review_mode") or "both")
+                    if need == mode or need == "both":
+                        still_needs = True
+                if still_needs:
+                    n = note_review_attempt(attempts, fid, mode)
+                    if n >= REVIEW_ATTEMPT_CAP:
+                        print(f"[review] {pid} {fid} {mode} 已试 {n} 次仍未写回，先验下一条")
+    finally:
+        _DRAINING.discard(pid)
+
+
+async def resume_pending_reviews() -> None:
+    """进程起来后，把空闲项目里没做完的复核接着做。正在跑的猎自己会拉起复核。"""
+    await asyncio.sleep(3)
+    try:
+        from ..engine.scheduler import manager
+        if getattr(manager, "shutting_down", False):
+            return
+    except Exception:
+        return
+    from ..db import db
+    from ..graph.store import findings_pending_review
+    from ..projects import get_project
+
+    try:
+        rows = await db.fetchall("SELECT id, status FROM projects")
+    except Exception:
+        return
+    for row in rows or []:
+        if str(row.get("status") or "") == "running":
+            continue
+        pid = str(row.get("id") or "")
+        if not pid:
+            continue
+        try:
+            pending = await findings_pending_review(pid)
+        except Exception:
+            continue
+        if not pending:
+            continue
+        try:
+            proj = await get_project(pid)
+        except Exception:
+            proj = None
+        if proj:
+            schedule_drain(proj)
 
 
 def start_manual(project: dict, finding: dict, mode: str) -> dict[str, Any]:

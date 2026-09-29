@@ -1,4 +1,4 @@
-"""红队/SRC 出口代理：pyfreeproxy 白名单源 + 自建池，后台探活。"""
+"""红队/SRC 出口代理：只探活设置页导入的代理。关开关则直连真实 IP。"""
 from __future__ import annotations
 
 import asyncio
@@ -195,11 +195,6 @@ class ProxyPool:
         self._cooldown[u] = time.monotonic() + max(30.0, float(seconds or DROP_COOLDOWN_SEC))
         self.live = [i for i in self.live if i.url != u]
         self.refresh_exit()
-        try:
-            from .yakit import yakit
-            yakit.note_pool_changed()
-        except Exception:
-            pass
 
     def current_item(self) -> LiveProxy | None:
         """MITM / 顶栏 / pick 共用的当前池节点：第一条能过 HTTPS 的存活，否则第一条存活。"""
@@ -217,17 +212,10 @@ class ProxyPool:
 
     def refresh_exit(self) -> None:
         """设置页「最近出口」必须等于当前池节点，不能另记一个 live[0]。"""
-        prev = self._current_url
         item = self.current_item()
         url = item.url if item else None
         self.exit_ip = (item.exit_ip or None) if item else None
         self._current_url = url
-        if url != prev:
-            try:
-                from .yakit import yakit
-                yakit.note_pool_changed()
-            except Exception:
-                pass
 
     def _usable(self, exclude: set[str] | None = None) -> list[LiveProxy]:
         skip = set(exclude or ()) | self._cooling()
@@ -384,25 +372,37 @@ class ProxyPool:
             await asyncio.sleep(0.4)
 
     async def set_enabled(self, on: bool) -> dict[str, Any]:
-        self.enabled = bool(on)
-        self.fetching = bool(on)
-        if not self.enabled:
+        if on and not self._custom_urls():
+            self.enabled = False
             self.fetching = False
+            self.error = "请添加代理"
+            self.save()
+            snap = self.snapshot()
+            snap["need_proxy"] = True
+            return snap
+        self.enabled = bool(on)
+        self.fetching = False
+        if self.enabled:
+            self.error = None
         self.save()
         self.ensure_loop()
-        try:
-            from .yakit import yakit
-            yakit.note_pool_changed()
-        except Exception:
-            pass
+        if self.enabled:
+            await self._probe_urls(self._custom_urls(), keep_existing=True)
         return self.snapshot()
 
     async def set_custom_text(self, text: str) -> dict[str, Any]:
         self.custom_text = str(text or "")
+        if self.enabled and not self._custom_urls():
+            self.enabled = False
+            self.fetching = False
+            self.error = "请添加代理"
         self.save()
         if self.enabled:
             await self._probe_urls(self._custom_urls(), keep_existing=True)
-        return self.snapshot()
+        snap = self.snapshot()
+        if not self._custom_urls():
+            snap["need_proxy"] = True
+        return snap
 
     def ensure_loop(self) -> None:
         try:
@@ -431,50 +431,21 @@ class ProxyPool:
             await asyncio.sleep(LOOP_PAUSE_SEC)
 
     async def _refresh_once(self) -> None:
-        self._direct_ip = await _probe_exit(None)
         custom = self._custom_urls()
+        allowed = set(custom)
         if custom:
             await self._probe_urls(custom, keep_existing=True, stop_at=MAX_LIVE)
-
-        pending = {
-            asyncio.create_task(_fetch_one_list(proto, url), name=f"pxlist-{proto}")
-            for proto, url in FALLBACK_LISTS
-        }
-        deadline = time.monotonic() + 22.0
-        while pending and time.monotonic() < deadline:
-            done, pending = await asyncio.wait(
-                pending,
-                timeout=max(0.05, deadline - time.monotonic()),
-                return_when=asyncio.FIRST_COMPLETED,
-            )
-            if not done:
-                break
-            for fut in done:
-                urls = _task_urls(fut)
-                if not urls:
-                    continue
-                stop = FIRST_WAVE if len(self.live) < FIRST_WAVE else MAX_LIVE
-                await self._probe_urls(urls, keep_existing=True, stop_at=stop)
-        for fut in pending:
-            fut.cancel()
-
-        if len(self.live) < MAX_LIVE:
-            extra: list[str] = []
-            try:
-                extra = await asyncio.wait_for(_fetch_proxifly_json(), timeout=12.0)
-            except Exception:
-                extra = []
-            if extra:
-                await self._probe_urls(extra, keep_existing=True, stop_at=MAX_LIVE)
-
-        if len(self.live) < MAX_LIVE:
-            await self._ingest_freeproxy()
-
+        self.live = [i for i in self.live if i.url in allowed]
         await self._recheck_live()
-        if not self.live:
-            self.error = "公开源暂无存活节点。免费列表多数已死，可在设置页粘贴自建代理。"
+        self.live = [i for i in self.live if i.url in allowed]
+        self.refresh_exit()
+        if not custom:
+            self.error = "请添加代理"
+        elif not self.live:
+            self.error = "已导入的代理暂无存活节点"
             print("[proxy] 本轮 0 存活", flush=True)
         else:
+            self.error = None
             print(f"[proxy] 本轮存活 {len(self.live)} 出口 {self.exit_ip}", flush=True)
 
     async def _ingest_freeproxy(self) -> None:
@@ -630,12 +601,7 @@ class ProxyPool:
             if via:
                 break
         if not via:
-            try:
-                scraped = list(self._custom_urls()) + await asyncio.wait_for(
-                    _fetch_fallback_lists(), timeout=16.0,
-                )
-            except Exception:
-                scraped = list(self._custom_urls())
+            scraped = list(self._custom_urls())
             random.shuffle(scraped)
             deadline = time.monotonic() + 35
             for i in range(0, min(len(scraped), 48), 16):

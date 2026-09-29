@@ -2197,7 +2197,7 @@ async def add_edge(project_id: str, edge: EdgeIn, run_id: str | None = None) -> 
 
 
 async def add_finding(project_id: str, finding: FindingIn, run_id: str | None = None) -> dict:
-    from .verify import VerifyResult, accept_secondary_review, verify_finding
+    from .verify import VerifyResult, accept_secondary_review, secondary_claim_failed, verify_finding
 
     cat, sev, rating = coerce_unproven_rce_claim(
         category=finding.category,
@@ -2233,6 +2233,10 @@ async def add_finding(project_id: str, finding: FindingIn, run_id: str | None = 
     rating = normalize_redteam_rating(getattr(finding, "redteam_rating", None)) or rating
     rating_why = (getattr(finding, "redteam_rating_rationale", None) or "").strip() or None
     secondary = 1 if getattr(finding, "secondary_verified", False) else 0
+    wants_exclude = str(getattr(finding, "verification_status", "") or "").lower() == "excluded"
+    if secondary and secondary_claim_failed(rating_why):
+        wants_exclude = True
+        secondary = 0
     from ..report.pi_finding_page import pi_report_from
     page = pi_report_from(finding)
     page_vals = tuple((page.get(k) or None) for k in (
@@ -2268,15 +2272,21 @@ async def add_finding(project_id: str, finding: FindingIn, run_id: str | None = 
         prev_sec = int(existing.get("secondary_verified") or 0)
         prev_st = str(existing.get("verification_status") or "")
         prev_vat = existing.get("verified_at")
-        vr = accept_secondary_review(vr, bool(secondary or prev_sec))
         ts = now()
-        stored_detail = vr.proof_detail
-        if vr.status == "verified":
-            new_st = "verified"
-            verified_at = ts if prev_st != "verified" else prev_vat
-        else:
-            new_st = prev_st or vr.status
+        if wants_exclude:
+            secondary = 0
+            new_st = "excluded"
             verified_at = prev_vat
+            stored_detail = vr.proof_detail
+        else:
+            vr = accept_secondary_review(vr, bool(secondary or prev_sec))
+            stored_detail = vr.proof_detail
+            if vr.status == "verified":
+                new_st = "verified"
+                verified_at = ts if prev_st != "verified" else prev_vat
+            else:
+                new_st = prev_st or vr.status
+                verified_at = prev_vat
         await db.execute(
             """UPDATE findings SET evidence=COALESCE(?, evidence),
                    poc_curl=COALESCE(?, poc_curl), poc_python=COALESCE(?, poc_python),
@@ -2294,11 +2304,22 @@ async def add_finding(project_id: str, finding: FindingIn, run_id: str | None = 
                WHERE id=?""",
             (finding.evidence, finding.poc_curl, finding.poc_python,
              vr.proof_type, vr.proof_canary, vr.proof_url, stored_detail,
-             new_st, verified_at, 1 if (secondary or prev_sec) else 0,
+             new_st, verified_at, 0 if wants_exclude else (1 if (secondary or prev_sec) else 0),
              rating, rating_why, *page_vals, cat, sev, fid),
         )
     else:
-        vr = accept_secondary_review(vr, bool(secondary))
+        if wants_exclude:
+            secondary = 0
+            vr = VerifyResult(
+                status="excluded",
+                reason="secondary_not_proven",
+                proof_type=vr.proof_type,
+                proof_canary=vr.proof_canary,
+                proof_url=vr.proof_url,
+                proof_detail=vr.proof_detail,
+            )
+        else:
+            vr = accept_secondary_review(vr, bool(secondary))
         ts = now()
         stored_detail = vr.proof_detail
         verified_at = ts if vr.status == "verified" else None
@@ -2404,6 +2425,7 @@ async def findings_pending_review(
             {
                 "secondary_verified": covered_sec,
                 "redteam_rating": "info" if covered_rate else None,
+                "verification_status": data.get("verification_status"),
             },
             want_secondary=do_sec,
             want_rating=do_rate,
@@ -3566,7 +3588,7 @@ async def list_library_findings(
     """跨项目漏洞库：非 rejected；counts 跟当前搜索同一过滤。可按赛道与集群父项名检索。"""
     from .verify import is_visible_finding
     from ..projects import project_track
-    from ..review.jobs import reviewing_modes
+    from ..review.jobs import review_state
 
     qn = str(q or "").strip().lower()
     pn = str(project or "").strip().lower()
@@ -3635,9 +3657,13 @@ async def list_library_findings(
         item["parent_name"] = row.get("parent_name") or ""
         item["parent_kind"] = row.get("parent_kind") or ""
         item["severity"] = disp
-        modes = reviewing_modes(str(item.get("project_id") or ""), str(item.get("id") or ""))
-        item["reviewing_secondary"] = "secondary" in modes
-        item["reviewing_rating"] = "rating" in modes
+        state = review_state(str(item.get("project_id") or ""), str(item.get("id") or ""))
+        sec = state.get("secondary")
+        rate = state.get("rating")
+        item["review_secondary"] = sec
+        item["review_rating"] = rate
+        item["reviewing_secondary"] = bool(sec and sec.get("status") == "running")
+        item["reviewing_rating"] = bool(rate and rate.get("status") == "running")
         matched.append(item)
         track_counts["all"] += 1
         if ptr in track_counts:

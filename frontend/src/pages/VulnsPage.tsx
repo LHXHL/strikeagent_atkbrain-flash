@@ -9,6 +9,13 @@ import { colors, displayFindingSeverity, scrubCandidateRceLabel } from "../theme
 import { countUp } from "../anim";
 import { useT } from "../i18n";
 
+type ReviewLive = {
+  status?: string;
+  started_at?: number;
+  updated_at?: number;
+  detail?: string;
+};
+
 type LibFinding = Finding & {
   project_id: string;
   project_name?: string;
@@ -20,7 +27,27 @@ type LibFinding = Finding & {
   parent_kind?: string;
   reviewing_secondary?: boolean;
   reviewing_rating?: boolean;
+  review_secondary?: ReviewLive | null;
+  review_rating?: ReviewLive | null;
 };
+
+function dur(sec: number): string {
+  const s = Math.max(0, Math.floor(sec));
+  if (s < 60) return `${s}秒`;
+  const m = Math.floor(s / 60);
+  const r = s % 60;
+  return r ? `${m}分${r}秒` : `${m}分`;
+}
+
+function reviewLine(row: ReviewLive | null | undefined, t: (key: string, vars?: Record<string, string | number>) => string): string {
+  if (!row?.status) return "";
+  if (row.status === "queued") return t("vulns.queuedDetail");
+  if (row.status === "dead") return row.detail || t("vulns.deadDetail");
+  const now = Date.now() / 1000;
+  const started = Number(row.started_at || now);
+  const clock = dur(now - started);
+  return t("vulns.liveDetail", { clock, detail: (row.detail || "").trim() || t("vulns.waitingModel") });
+}
 
 type Counts = { total: number; critical: number; high: number; medium: number; low: number; info: number };
 type TrackCounts = { all: number; redteam: number; ctf: number; src: number };
@@ -174,8 +201,10 @@ export function VulnsPage() {
             {items.map((f) => {
               const secKey = `${f.project_id}:${f.id}:secondary`;
               const rateKey = `${f.project_id}:${f.id}:rating`;
-              const secBusy = !!busy[secKey] || !!f.reviewing_secondary;
-              const rateBusy = !!busy[rateKey] || !!f.reviewing_rating;
+              const sec = f.review_secondary;
+              const rate = f.review_rating;
+              const secHeld = !!busy[secKey] || !!sec;
+              const rateHeld = !!busy[rateKey] || !!rate;
               return (
                 <tr key={`${f.project_id}:${f.id}`}>
                   <td>
@@ -204,28 +233,40 @@ export function VulnsPage() {
                   <td><SeverityBadge severity={displayFindingSeverity(f)} /></td>
                   <td>
                     <div className="row" style={{ gap: 6, flexWrap: "wrap" }}>
-                      <SecondaryVerifyBadge done={!!f.secondary_verified} reviewing={secBusy && !f.secondary_verified} />
-                      <RedteamRatingBadge rating={f.redteam_rating} reviewing={rateBusy && !f.redteam_rating} />
+                      {(f.verification_status || "").toLowerCase() === "excluded" ? (
+                        <SecondaryVerifyBadge excluded />
+                      ) : (
+                        <>
+                          <SecondaryVerifyBadge done={!!f.secondary_verified} reviewing={sec?.status === "running" && !f.secondary_verified} />
+                          <RedteamRatingBadge rating={f.redteam_rating} reviewing={rate?.status === "running" && !f.redteam_rating} />
+                        </>
+                      )}
                     </div>
                   </td>
                   <td onClick={(e) => e.stopPropagation()}>
                     <div className="row" style={{ gap: 6, flexWrap: "wrap" }}>
-                      <button
-                        type="button"
-                        className="btn btn-secondary btn-sm"
-                        disabled={secBusy}
-                        onClick={() => { void startReview(f, "secondary"); }}
-                      >
-                        {secBusy ? t("vulns.running") : t("vulns.secondary")}
-                      </button>
-                      <button
-                        type="button"
-                        className="btn btn-secondary btn-sm"
-                        disabled={rateBusy}
-                        onClick={() => { void startReview(f, "rating"); }}
-                      >
-                        {rateBusy ? t("vulns.running") : t("vulns.rating")}
-                      </button>
+                      <div className="stack" style={{ gap: 2, alignItems: "flex-start" }}>
+                        <button
+                          type="button"
+                          className="btn btn-secondary btn-sm"
+                          disabled={secHeld}
+                          onClick={() => { void startReview(f, "secondary"); }}
+                        >
+                          {sec?.status === "running" ? t("vulns.running") : sec?.status === "queued" ? t("vulns.queued") : sec?.status === "dead" ? t("vulns.deadDetail") : t("vulns.secondary")}
+                        </button>
+                        {sec ? <span className="table-sub">{reviewLine(sec, t)}</span> : null}
+                      </div>
+                      <div className="stack" style={{ gap: 2, alignItems: "flex-start" }}>
+                        <button
+                          type="button"
+                          className="btn btn-secondary btn-sm"
+                          disabled={rateHeld}
+                          onClick={() => { void startReview(f, "rating"); }}
+                        >
+                          {rate?.status === "running" ? t("vulns.running") : rate?.status === "queued" ? t("vulns.queued") : rate?.status === "dead" ? t("vulns.deadDetail") : t("vulns.rating")}
+                        </button>
+                        {rate ? <span className="table-sub">{reviewLine(rate, t)}</span> : null}
+                      </div>
                     </div>
                   </td>
                 </tr>

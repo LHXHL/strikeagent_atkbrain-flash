@@ -352,7 +352,7 @@ export function ProjectPage() {
   const isSrc = project.config?.objective === "src" || project.config?.track === "src";
   const visibleFindings = collectVulns(graph.findings, graph.nodes, { src: isSrc });
   const reviewState = latestFindingReview(events);
-  const reviewLive = { ...reviewState, running: reviewState.running && running };
+  const reviewLive = reviewState;
   const visibleHigh = visibleFindings.filter(
     (f) => displayFindingSeverity(f) === "high",
   ).length;
@@ -483,7 +483,7 @@ export function ProjectPage() {
 
       <div className="project-split">
         <div className="project-graph-pane">
-          <AttackGraph graph={graph} onSelect={onSelect} selectedKey={selected?.key} onClear={() => setSelected(null)} />
+          <AttackGraph key={id || "graph"} graph={graph} onSelect={onSelect} selectedKey={selected?.key} onClear={() => setSelected(null)} />
         </div>
         <div className="card-cream project-side-pane">
           <div className="tabs project-side-tabs">
@@ -492,7 +492,7 @@ export function ProjectPage() {
             ))}
           </div>
           <div className="project-side-body">
-            {tab !== "findings" && <FindingReviewBanner review={reviewLive} />}
+            {tab !== "findings" && <FindingReviewBanner review={reviewLive} findings={visibleFindings} />}
             {selected && (
               <div className="project-node-detail">
                 <NodeDetail node={graph.nodes.find((n) => n.key === selected.key) || selected} graph={graph} />

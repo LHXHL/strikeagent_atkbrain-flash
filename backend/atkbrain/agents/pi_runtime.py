@@ -32,8 +32,43 @@ REVIEW_ROLE = "finding-review"
 EmitFn = Callable[..., Awaitable[None]]
 
 
+def _usable_api_key(raw: str | None) -> str:
+    """空串和 $ENV 占位不算已配置。"""
+    key = str(raw or "").strip().strip('"').strip("'")
+    if not key or key.startswith("$"):
+        return ""
+    if key.lower() in {"changeme", "your-api-key", "your_api_key", "sk-xxx"}:
+        return ""
+    return key
+
+
+def _pi_models_api_key() -> str:
+    """设置页写进 pi-models.json 的密钥。优先 defaultProvider。"""
+    try:
+        data = load_pi_models()
+    except Exception:
+        return ""
+    providers = data.get("providers") if isinstance(data.get("providers"), dict) else {}
+    name = str(data.get("defaultProvider") or "").strip()
+    order: list[str] = []
+    if name:
+        order.append(name)
+    order.extend(str(k) for k in providers if str(k) not in order)
+    for pname in order:
+        prov = providers.get(pname)
+        if not isinstance(prov, dict):
+            continue
+        key = _usable_api_key(prov.get("apiKey"))
+        if key:
+            return key
+    return ""
+
+
 def llm_api_key() -> str:
-    return (os.environ.get("DEEPSEEK_API_KEY") or os.environ.get("ANTHROPIC_AUTH_TOKEN") or "").strip()
+    env = _usable_api_key(os.environ.get("DEEPSEEK_API_KEY") or os.environ.get("ANTHROPIC_AUTH_TOKEN"))
+    if env:
+        return env
+    return _pi_models_api_key()
 
 
 def llm_api_key_configured() -> bool:
@@ -93,7 +128,7 @@ def cap_hunt_workers(roles: list[str], *, per_project: int | None = None) -> lis
     seen: set[str] = set()
     for raw in roles:
         name = str(raw or "").strip().lower()
-        if not name or name in seen or name in ONESHOT_ROLES or name == REVIEW_ROLE:
+        if not name or name in seen or name in ONESHOT_ROLES or _is_review_role(name):
             continue
         seen.add(name)
         out.append(name)
@@ -102,9 +137,14 @@ def cap_hunt_workers(roles: list[str], *, per_project: int | None = None) -> lis
     return out
 
 
+def _is_review_role(role: str) -> bool:
+    r = (role or "").strip().lower()
+    return r == REVIEW_ROLE or r.startswith(REVIEW_ROLE + ":")
+
+
 def _counts_toward_per_project(role: str) -> bool:
     r = (role or "").strip().lower()
-    if not r or r in ONESHOT_ROLES or r == REVIEW_ROLE:
+    if not r or r in ONESHOT_ROLES or _is_review_role(r):
         return False
     return True
 
@@ -396,17 +436,23 @@ def kill_live_for_project(
     if not want:
         return 0
     keep = {str(x).strip() for x in (keep_roles or ()) if str(x).strip()}
+
+    def _spare(role: str) -> bool:
+        if role in keep:
+            return True
+        return REVIEW_ROLE in keep and _is_review_role(role)
+
     targets: set[int] = set()
     _reap_dead()
     for proc_pid, rec in list(_LIVE.items()):
         if rec[0] != want:
             continue
-        if rec[1] in keep:
+        if _spare(rec[1]):
             continue
         targets.add(proc_pid)
         targets.update(_descendants(proc_pid))
     for proc_pid in _scan_pi_pids(project_id=want):
-        if keep and _proc_role(proc_pid) in keep:
+        if keep and _spare(_proc_role(proc_pid)):
             continue
         targets.add(proc_pid)
     n = 0
@@ -454,7 +500,7 @@ def pi_bin() -> str:
     )
 
 
-def pi_model() -> str:
+def _env_pi_model() -> str:
     return (
         (getattr(settings, "pi_model", None) or "").strip()
         or (getattr(settings, "claude_model", None) or "").strip()
@@ -462,8 +508,118 @@ def pi_model() -> str:
     )
 
 
-def pi_provider() -> str:
+def _env_pi_provider() -> str:
     return (getattr(settings, "pi_provider", None) or "deepseek").strip() or "deepseek"
+
+
+def pi_models_file() -> Path:
+    return Path(settings.data_dir) / "pi-models.json"
+
+
+def default_pi_models() -> dict:
+    return {
+        "defaultProvider": _env_pi_provider(),
+        "defaultModel": _env_pi_model(),
+        "providers": {
+            "deepseek": {
+                "baseUrl": "https://api.deepseek.com",
+                "api": "openai-completions",
+                "apiKey": "$DEEPSEEK_API_KEY",
+                "models": [
+                    {
+                        "id": "deepseek-flash",
+                        "name": "deepseek-flash",
+                        "contextWindow": 1000000,
+                        "maxTokens": 384000,
+                        "input": ["text"],
+                        "reasoning": True,
+                        "thinkingLevelMap": {
+                            "minimal": None, "low": None, "medium": None,
+                            "high": "high", "xhigh": "max",
+                        },
+                        "cost": {
+                            "input": 0.14, "output": 0.28,
+                            "cacheRead": 0.028, "cacheWrite": 0,
+                        },
+                        "compat": {
+                            "requiresReasoningContentOnAssistantMessages": True,
+                            "thinkingFormat": "deepseek",
+                            "reasoningEffortMap": {
+                                "minimal": "high", "low": "high", "medium": "high",
+                                "high": "high", "xhigh": "max",
+                            },
+                        },
+                    }
+                ],
+            }
+        },
+    }
+
+
+def load_pi_models() -> dict:
+    path = pi_models_file()
+    data = None
+    if path.is_file():
+        try:
+            loaded = json.loads(path.read_text(encoding="utf-8") or "{}")
+        except Exception:
+            loaded = None
+        if isinstance(loaded, dict) and isinstance(loaded.get("providers"), dict):
+            data = loaded
+    if data is None:
+        data = default_pi_models()
+        try:
+            path.parent.mkdir(parents=True, exist_ok=True)
+            path.write_text(json.dumps(data, ensure_ascii=False, indent=2) + "\n", encoding="utf-8")
+        except Exception:
+            pass
+    data.setdefault("defaultProvider", _env_pi_provider())
+    data.setdefault("defaultModel", _env_pi_model())
+    return data
+
+
+def pi_models_text() -> str:
+    return json.dumps(load_pi_models(), ensure_ascii=False, indent=2) + "\n"
+
+
+def save_pi_models_text(text: str) -> dict:
+    try:
+        data = json.loads(text or "")
+    except Exception as e:
+        raise ValueError(f"JSON 不合法：{e}") from e
+    if not isinstance(data, dict) or not isinstance(data.get("providers"), dict) or not data["providers"]:
+        raise ValueError("需要包含非空 providers 对象")
+    provider = str(data.get("defaultProvider") or "").strip()
+    model = str(data.get("defaultModel") or "").strip()
+    if not provider or not model:
+        raise ValueError("需要 defaultProvider 和 defaultModel")
+    if provider not in data["providers"]:
+        raise ValueError("defaultProvider 不在 providers 里")
+    path = pi_models_file()
+    path.parent.mkdir(parents=True, exist_ok=True)
+    path.write_text(json.dumps(data, ensure_ascii=False, indent=2) + "\n", encoding="utf-8")
+    ensure_pi_agent_dir()
+    return data
+
+
+def pi_model() -> str:
+    try:
+        model = str(load_pi_models().get("defaultModel") or "").strip()
+        if model:
+            return model
+    except Exception:
+        pass
+    return _env_pi_model()
+
+
+def pi_provider() -> str:
+    try:
+        provider = str(load_pi_models().get("defaultProvider") or "").strip()
+        if provider:
+            return provider
+    except Exception:
+        pass
+    return _env_pi_provider()
 
 
 def ensure_pi_agent_dir(*, hosted: bool | None = None) -> Path:
@@ -499,55 +655,23 @@ def ensure_pi_agent_dir(*, hosted: bool | None = None) -> Path:
         settings_path.write_text(json.dumps(data, ensure_ascii=False, indent=2) + "\n", encoding="utf-8")
 
     use_gw = hosted if hosted is not None else hosted_enabled()
-    base = "https://api.deepseek.com"
+    models = json.loads(json.dumps(load_pi_models()))
     if use_gw:
         base = rewrite_llm_url_for_gateway("https://api.deepseek.com")
         if GATEWAY_SUFFIX not in base:
             base = "http://api.deepseek.com.tsecbench.gw"
-    models = {
-        "providers": {
-            "deepseek": {
-                "baseUrl": base,
-                "api": "openai-completions",
-                "apiKey": "$DEEPSEEK_API_KEY",
-                "models": [
-                    {
-                        "id": "deepseek-flash",
-                        "name": "deepseek-flash",
-                        "contextWindow": 1000000,
-                        "maxTokens": 384000,
-                        "input": ["text"],
-                        "reasoning": True,
-                        "thinkingLevelMap": {
-                            "minimal": None, "low": None, "medium": None,
-                            "high": "high", "xhigh": "max",
-                        },
-                        "cost": {
-                            "input": 0.14, "output": 0.28,
-                            "cacheRead": 0.028, "cacheWrite": 0,
-                        },
-                        "compat": {
-                            "requiresReasoningContentOnAssistantMessages": True,
-                            "thinkingFormat": "deepseek",
-                            "reasoningEffortMap": {
-                                "minimal": "high", "low": "high", "medium": "high",
-                                "high": "high", "xhigh": "max",
-                            },
-                        },
-                    }
-                ],
-            }
-        }
-    }
+        providers = models.get("providers") if isinstance(models.get("providers"), dict) else {}
+        deepseek = providers.get("deepseek") if isinstance(providers.get("deepseek"), dict) else None
+        if deepseek is not None:
+            deepseek["baseUrl"] = base
     models_path = agent / "models.json"
-    if use_gw or not models_path.is_file():
-        models_path.write_text(json.dumps(models, ensure_ascii=False, indent=2) + "\n", encoding="utf-8")
+    models_path.write_text(json.dumps(models, ensure_ascii=False, indent=2) + "\n", encoding="utf-8")
     return agent
 
 
 def _child_env(*, project_id: str | None, tools: bool, role: str = "") -> dict[str, str]:
     env = dict(os.environ)
-    key = (env.get("DEEPSEEK_API_KEY") or env.get("ANTHROPIC_AUTH_TOKEN") or "").strip()
+    key = llm_api_key()
     if key:
         env["DEEPSEEK_API_KEY"] = key
         env.setdefault("ANTHROPIC_AUTH_TOKEN", key)
@@ -761,6 +885,33 @@ class PiSession:
             if self._prompt_ok and not self._prompt_ok.done():
                 self._prompt_ok.set_result(False)
 
+    def _review_beat_for(self, typ: str, event: dict) -> None:
+        """复核进程把当前动作写进任务，页面才能看出是不是还活着。不含参数。"""
+        jid = str(getattr(self, "review_job_id", "") or "")
+        if not jid:
+            return
+        detail = ""
+        if typ == "message_update":
+            ev = event.get("assistantMessageEvent") or {}
+            et = str(ev.get("type") or "")
+            if et in ("text_delta", "text_end", "thinking_delta", "thinking_end"):
+                detail = "模型生成中"
+            elif et == "toolcall_start":
+                name = str(ev.get("toolName") or "").strip()
+                detail = f"正在调用 {name}" if name else "正在调用工具"
+        elif typ == "tool_execution_start":
+            name = str(event.get("toolName") or event.get("name") or "").strip()
+            detail = f"正在调用 {name}" if name else "正在调用工具"
+        elif typ == "compaction_start":
+            detail = "正在压缩上下文"
+        if not detail:
+            return
+        try:
+            from ..review.jobs import note_review_beat
+            note_review_beat(jid, detail)
+        except Exception:
+            pass
+
     async def _on_event(self, event: dict) -> None:
         typ = str(event.get("type") or "")
         if typ == "response":
@@ -773,6 +924,7 @@ class PiSession:
                 self.on_activity()
             except Exception:
                 pass
+        self._review_beat_for(typ, event)
         if typ == "agent_settled":
             await self._flush_streams()
             self._settled.set()
@@ -915,10 +1067,7 @@ class PiSession:
         if not self.tools and not ack_ok:
             wait = min(wait, 15.0) if wait > 0 else 15.0
         try:
-            if wait > 0:
-                await asyncio.wait_for(self._settled.wait(), timeout=wait)
-            else:
-                await self._settled.wait()
+            await self._wait_settled(wait)
         except TimeoutError:
             text = "".join(self.texts).strip()
             await self.abort()
@@ -926,6 +1075,33 @@ class PiSession:
                 return text
             raise
         return "".join(self.texts).strip()
+
+    def _pulse_review(self) -> None:
+        jid = str(getattr(self, "review_job_id", "") or "")
+        if not jid:
+            return
+        try:
+            from ..review.jobs import pulse_review
+            pulse_review(jid)
+        except Exception:
+            pass
+
+    async def _wait_settled(self, wait: float) -> None:
+        """等模型时每 8 秒报一次活。进程没了就立刻失败，不把静默当成卡死。"""
+        deadline = time.monotonic() + wait if wait > 0 else None
+        while not self._settled.is_set():
+            self._pulse_review()
+            slice_s = 8.0
+            if deadline is not None:
+                slice_s = min(slice_s, max(0.1, deadline - time.monotonic()))
+            try:
+                await asyncio.wait_for(self._settled.wait(), timeout=slice_s)
+                return
+            except TimeoutError:
+                if not self.alive():
+                    raise RuntimeError("pi process exited")
+                if deadline is not None and time.monotonic() >= deadline:
+                    raise TimeoutError
 
     async def abort(self) -> None:
         try:

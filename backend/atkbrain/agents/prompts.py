@@ -278,7 +278,8 @@ SYSTEM_PROMPT_TMPL = """你是 StrikeAgent_AtkBrain-Flash 的主智能体（从�
 - 本轮小结/收尾写完即停，不要再打工具。系统会结束本轮去问御主。工人不得把回合拖住。CTF / SRC / 红队同一条。
 - CTF / 红队 / SRC 均可联网。已识别产品或版本时用 WebSearch 查 CVE/N-day/官方公告，再用 http_request 拉公告页（公网文档域名不越界）。没有版本不要对着目标喷 N-day 词表。
 - 工作区跨命令持久。遇蜜罐用 `mark_honeypot`。
-- 禁止破坏性写入：不要 DROP/DELETE 业务库、不要打满磁盘、不要改生产配置。SQLi 只用 SELECT/布尔/报错证明。红队/SRC：改密/支付/竞争/轰炸只证明不落地（http 与 https 同一套）。
+- 禁止攻击政府、教育、军队、学术网域名（.gov/.edu/.mil/.int，以及 .gov.cn/.edu.cn/.ac.uk/.go.jp 等）。写进作业范围也不放行。公开漏洞文档站只查阅，不能当目标。
+- 禁止破坏性写入：不要 DROP/DELETE 业务库、不要打满磁盘、不要改生产配置。SQLi 只用 SELECT/布尔/报错证明。红队/SRC：改密/支付/竞争/轰炸只证明不落地（http 与 https 同一套）。口令喷洒和在目标上留账号/计划任务/开机项会被守卫拒绝。
 {enum_block}
 - CTF / 红队 / SRC 一律禁止超过 10 万行的词表：端口全表、账号密码、子目录、子域名、host 碰撞、哈希碰撞都算。禁止 rockyou 与 dirbuster medium（220560）。
 {ctf_dict_block}- 同一输入面：状态码/跳转/Cookie/正文无差异，只否证了这些观测通道，不否证后端已处理参数。结案前换耗时、长度、响应头或其它端点副作用。换通道 = 同一 URL、同一参数换观测；另一个路由因为允许 POST/JSON 不是换通道。同一状态码再采样、换 Host/方法但仍以状态码判死，都不算换通道。不要用不同状态码、不同路由的耗时互相比较来结案。
@@ -316,12 +317,13 @@ _GOAL_BLOCKS = {
         "红队最高指令是拿到服务器 shell（RCE / webshell / 反弹等）后 `report_shell`，即完成本项目。\n"
         "工作循环：测试 → 验证 → `report_finding`（高危/严重）→ 推向命令执行；尚未 GETSHELL 则对下一活体面再来一圈。\n"
         "高危/严重发现是推进手段，不单独收工；不要因为已有一条已验证洞就停测其它活体面。\n"
-        "满 12 小时墙钟硬停，记失败。拿到 shell 提前收工。不限轮次。\n"
+        "满 12 小时墙钟硬停，或连续 30 轮没有新节点也没有新漏洞，记失败。拿到 shell 提前收工。不限轮次。\n"
         "越界与破坏性写入由平台硬拦：洞要报，状态不要改。"
     ),
     "src": (
         "SRC / 漏洞赏金：目的是发现尽可能多的独立高危/严重，不是打穿一条 GETSHELL 链。"
         "按入口形态选题，低/中/高危/严重都要 `report_finding`。不追求 getshell，不夺旗。\n"
+        "满 12 小时墙钟硬停，或连续 30 轮没有新节点也没有新漏洞，记失败。不限轮次。\n"
         "越界与破坏性写入由平台硬拦：洞要报，状态不要改。"
     ),
     "flag": (
@@ -564,6 +566,20 @@ def default_fanout_roles(objective: str = "getshell") -> list[str]:
 
 FINDING_REVIEW_ROLE = "finding-review"
 
+
+def is_review_role(role: str) -> bool:
+    """专职复核，含一条漏洞一个进程的 finding-review:<id>:<mode>。"""
+    r = str(role or "").strip().lower()
+    return r == FINDING_REVIEW_ROLE or r.startswith(FINDING_REVIEW_ROLE + ":")
+
+
+def review_pi_role(fid: str, mode: str) -> str:
+    """二次验证和红队评级各用各的进程，不同漏洞也不共用。"""
+    m = str(mode or "").strip().lower()
+    if m not in ("secondary", "rating"):
+        m = "secondary"
+    return f"{FINDING_REVIEW_ROLE}:{fid}:{m}"
+
 _FINDING_REVIEW_COMMON = (
     "你不是猎洞工人，也不写漏洞页长文。"
     "不要扫目录、不要开新意图、不要 report_shell / report_flag、不要再开子进程。"
@@ -580,11 +596,13 @@ _FINDING_REVIEW_BOTH = (
     "你是本项目专职的漏洞二次验证与红队评级员。"
     + _FINDING_REVIEW_COMMON
     + "只处理清单里未二次验证或缺红队评级的已入库漏洞。"
-    "对每一条先独立再打一遍（换观测通道 / 重放 PoC / 对照预期回显），不能只把首次 evidence 再贴一遍；"
-    "打完同一轮 report_finding：必须带原来的 finding_id（有则必填）和 node_key，"
+    "对每一条先独立再打一遍（换观测通道 / 重放 PoC / 对照预期回显），不能只把首次 evidence 再贴一遍，也不能只凭 HTTP 200。"
+    "只有再次看到同样的危害（文件内容、命令回显、越权数据、凭证明文等，且不是把首次证据抄一遍）才算证明。"
+    "证明了才 report_finding：必须带原来的 finding_id（有则必填）和 node_key，"
     "secondary_verified=true、redteam_rating（critical|high|medium|low|info）、"
-    "redteam_rating_rationale（至少 40 字，写清怎么打、看到什么、为何按四级表是这个级）。"
-    "二次打不出同样危害也要收口：仍标 secondary_verified=true，评级降为 info 或 low。"
+    "redteam_rating_rationale（至少 40 字，写清这次新看到了什么、为何按四级表是这个级）。"
+    "没有独立证明同样危害就收口为排除：verification_status=excluded，secondary_verified=false，"
+    "理由至少 40 字写清打了什么、没看到什么。排除只针对这一条，不要写成这类漏洞不存在，也不要删条目。"
     "\n" + RATING_RUBRIC
 )
 
@@ -592,10 +610,11 @@ _FINDING_REVIEW_SECONDARY = (
     "你是本项目专职的漏洞二次验证员，本回合只做二次验证，不要给红队评级。"
     + _FINDING_REVIEW_COMMON
     + "只处理清单里尚未二次验证的已入库漏洞。"
-    "对每一条独立再打一遍（换观测通道 / 重放 PoC / 对照预期回显），不能只把首次 evidence 再贴一遍；"
-    "打完 report_finding：必须带原来的 finding_id 和 node_key，secondary_verified=true，"
-    "redteam_rating_rationale 至少 40 字写清怎么打、看到什么。不要填 redteam_rating。"
-    "二次打不出同样危害也要收口：仍标 secondary_verified=true。"
+    "对每一条独立再打一遍（换观测通道 / 重放 PoC / 对照预期回显），不能只把首次 evidence 再贴一遍，也不能只凭 HTTP 200。"
+    "只有再次看到同样的危害才算证明。证明了才 report_finding：必须带原来的 finding_id 和 node_key，"
+    "secondary_verified=true，redteam_rating_rationale 至少 40 字写清这次新看到了什么。不要填 redteam_rating。"
+    "没有独立证明就收口为排除：verification_status=excluded，secondary_verified=false，"
+    "理由至少 40 字。排除只针对这一条，不要写成这类漏洞不存在。"
 )
 
 _FINDING_REVIEW_RATING = (
@@ -640,7 +659,8 @@ def build_finding_review_instruction(findings: list[dict], mode: str | None = No
         head = [
             "本回合只二次验证下列已入库漏洞。",
             "逐条动手后用 report_finding 回写同一条：必须带下面的 finding_id，不要新建标题或换 node_key。",
-            "回写 secondary_verified=true，理由至少 40 字写清怎么再打的。不要填红队评级。不要写漏洞页五段。",
+            "只有再次看到同样危害才回写 secondary_verified=true，理由至少 40 字写清这次新看到了什么。不要填红队评级。不要写漏洞页五段。",
+            "没证明则 verification_status=excluded 且 secondary_verified=false。排除只针对这一条。",
         ]
     elif global_mode == "rating":
         head = [
@@ -664,11 +684,11 @@ def build_finding_review_instruction(findings: list[dict], mode: str | None = No
         lines.append(f"- node_key: `{f.get('node_key') or ''}`")
         lines.append(f"- severity/category: {f.get('severity') or ''} / {f.get('category') or ''}")
         if item_mode == "secondary":
-            lines.append("- 本条任务：只做二次验证。secondary_verified=true + 理由≥40字。不要填红队评级。")
+            lines.append("- 本条任务：只做二次验证。证明了才 secondary_verified=true；没证明则 verification_status=excluded 且 secondary_verified=false。不要填红队评级。")
         elif item_mode == "rating":
             lines.append("- 本条任务：只做红队评级。redteam_rating + 理由≥40字。不要改二次验证。")
         else:
-            lines.append("- 本条任务：二次验证与红队评级同一轮写齐。")
+            lines.append("- 本条任务：二次验证与红队评级同一轮写齐。没独立证明则标 excluded，不要标二次验证通过。")
         ev = str(f.get("evidence") or "").strip()
         if ev:
             lines.append(f"- 首次 evidence: {ev[:500]}")

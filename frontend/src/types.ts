@@ -83,6 +83,7 @@ export interface Finding {
   report_repro?: string;
   report_fix?: string;
   report_pending?: boolean;
+  report_state?: "pending" | "writing" | "ready" | string;
 }
 
 /** 弹层用的全量详情（含手动步骤与 PoC） */

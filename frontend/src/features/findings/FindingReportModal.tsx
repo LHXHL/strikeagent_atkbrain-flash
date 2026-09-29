@@ -6,15 +6,12 @@ import { SeverityBadge, VerifyBadge, SecondaryVerifyBadge } from "../../componen
 import { displayFindingSeverity, scrubCandidateRceLabel } from "../../theme";
 import { useT } from "../../i18n";
 
-function SectionBody({ text, pending }: { text?: string; pending?: boolean }) {
-  const { t } = useT();
+function SectionBody({ text, placeholder }: { text?: string; placeholder: string }) {
   const body = (text || "").trim();
   if (!body) {
     return (
       <p className="muted" style={{ fontSize: 13, margin: 0 }}>
-        {pending
-          ? t("findings.pendingCopy")
-          : t("findings.notCollected")}
+        {placeholder}
       </p>
     );
   }
@@ -36,11 +33,36 @@ export function FindingReportModal({
     let cancelled = false;
     setErr("");
     setDetail(null);
-    api.getFinding(projectId, finding.id)
+    const load = () => api.getFinding(projectId, finding.id)
       .then((d) => { if (!cancelled) setDetail(d); })
       .catch((e) => { if (!cancelled) setErr(String(e?.message || e)); });
+    load();
     return () => { cancelled = true; };
   }, [projectId, finding.id]);
+
+  useEffect(() => {
+    if (detail?.report_state !== "writing") return;
+    let left = 24;
+    let cancelled = false;
+    const timer = window.setInterval(() => {
+      left -= 1;
+      if (left <= 0) {
+        window.clearInterval(timer);
+        return;
+      }
+      api.getFinding(projectId, finding.id)
+        .then((d) => {
+          if (cancelled) return;
+          setDetail(d);
+          if (d?.report_state !== "writing") window.clearInterval(timer);
+        })
+        .catch(() => {});
+    }, 4000);
+    return () => {
+      cancelled = true;
+      window.clearInterval(timer);
+    };
+  }, [detail?.report_state, projectId, finding.id]);
 
   const downloadMd = () => {
     window.open(api.findingReportUrl(projectId, finding.id, locale), "_blank");
@@ -50,13 +72,15 @@ export function FindingReportModal({
   const poc = d?.poc;
   const shownSev = displayFindingSeverity(d || finding);
   const title = `[${shownSev.toUpperCase()}] ${scrubCandidateRceLabel(finding.title) || finding.title}`;
-  const curl = (poc?.curl || d?.poc_curl || "").trim();
-  const pending = !!(d?.report_pending ?? (!d && !finding.secondary_verified));
-  const summary = d?.report_summary || d?.description || finding.description || "";
-  const impact = d?.report_impact || d?.impact_detail || d?.impact || "";
-  const rating = d?.report_rating || d?.secondary_review || d?.redteam_rating_rationale || "";
-  const repro = d?.report_repro || d?.manual_repro || "";
-  const fix = d?.report_fix || d?.remediation || "";
+  const state = d?.report_state || (d?.report_pending ? "pending" : d ? "ready" : "pending");
+  const showPage = state === "ready";
+  const curl = showPage ? (poc?.curl || d?.poc_curl || "").trim() : "";
+  const summary = showPage ? (d?.report_summary || "") : "";
+  const impact = showPage ? (d?.report_impact || "") : "";
+  const rating = showPage ? (d?.report_rating || "") : "";
+  const repro = showPage ? (d?.report_repro || "") : "";
+  const fix = showPage ? (d?.report_fix || "") : "";
+  const placeholder = state === "writing" ? t("findings.writing") : t("findings.pendingCopy");
 
   return (
     <Modal title={title} onClose={onClose} wide>
@@ -64,7 +88,9 @@ export function FindingReportModal({
         <div className="row" style={{ gap: 8, marginBottom: 12, flexWrap: "wrap" }}>
           <SeverityBadge severity={shownSev} />
           <VerifyBadge status={finding.verification_status || detail?.verification_status} />
-          <SecondaryVerifyBadge done={!!(finding.secondary_verified || detail?.secondary_verified)} />
+          {(finding.verification_status || detail?.verification_status || "").toLowerCase() !== "excluded" && (
+            <SecondaryVerifyBadge done={!!(finding.secondary_verified || detail?.secondary_verified)} />
+          )}
           <span className="muted" style={{ fontSize: 12 }}>{finding.category}</span>
           <div style={{ flex: 1 }} />
           <button className="btn btn-primary btn-sm" onClick={downloadMd}>{t("findings.downloadMd")}</button>
@@ -72,36 +98,37 @@ export function FindingReportModal({
 
         {err && <p style={{ color: "var(--error)", fontSize: 13 }}>{err}</p>}
         {!d && !err && (
-          <p className="muted" style={{ fontSize: 13 }}>
-            {finding.secondary_verified
-              ? t("findings.writing")
-              : t("findings.loading")}
-          </p>
+          <p className="muted" style={{ fontSize: 13 }}>{t("findings.loading")}</p>
         )}
 
         {d && (
           <>
-            {pending && (
+            {state === "pending" && (
               <p className="muted" style={{ fontSize: 12, margin: "0 0 12px" }}>
                 {t("findings.pageNote")}
               </p>
             )}
+            {state === "writing" && (
+              <p className="muted" style={{ fontSize: 12, margin: "0 0 12px" }}>
+                {t("findings.writing")}
+              </p>
+            )}
 
             <h3>{t("findings.summary")}</h3>
-            <SectionBody text={summary} pending={pending && !summary} />
+            <SectionBody text={summary} placeholder={placeholder} />
 
             <h3>{t("findings.impact")}</h3>
-            <SectionBody text={impact} pending={pending} />
+            <SectionBody text={impact} placeholder={placeholder} />
 
             <h3>{t("findings.rating")}</h3>
-            <SectionBody text={rating} pending={pending} />
+            <SectionBody text={rating} placeholder={placeholder} />
 
             <h3>{t("findings.repro")}</h3>
-            <SectionBody text={repro} pending={pending} />
+            <SectionBody text={repro} placeholder={placeholder} />
             {curl ? <pre style={{ maxHeight: 280 }}>{curl}</pre> : null}
 
             <h3>{t("findings.fix")}</h3>
-            <SectionBody text={fix} pending={pending} />
+            <SectionBody text={fix} placeholder={placeholder} />
 
             <div className="row" style={{ gap: 8, marginTop: 20, borderTop: "1px solid var(--hair)", paddingTop: 14 }}>
               <button className="btn btn-primary" onClick={downloadMd}>{t("findings.downloadThis")}</button>

@@ -30,9 +30,26 @@ class ParseTests(unittest.TestCase):
 class LlmKeyTests(unittest.TestCase):
     def test_configured(self):
         from atkbrain.agents.pi_runtime import llm_api_key_configured
-        with patch.dict("os.environ", {"DEEPSEEK_API_KEY": "", "ANTHROPIC_AUTH_TOKEN": ""}, clear=False):
+        with (
+            patch.dict("os.environ", {"DEEPSEEK_API_KEY": "", "ANTHROPIC_AUTH_TOKEN": ""}, clear=False),
+            patch("atkbrain.agents.pi_runtime._pi_models_api_key", return_value=""),
+        ):
             self.assertFalse(llm_api_key_configured())
-        with patch.dict("os.environ", {"DEEPSEEK_API_KEY": "sk-test", "ANTHROPIC_AUTH_TOKEN": ""}, clear=False):
+        with (
+            patch.dict("os.environ", {"DEEPSEEK_API_KEY": "sk-test", "ANTHROPIC_AUTH_TOKEN": ""}, clear=False),
+            patch("atkbrain.agents.pi_runtime._pi_models_api_key", return_value=""),
+        ):
+            self.assertTrue(llm_api_key_configured())
+
+    def test_settings_json_key_counts(self):
+        from atkbrain.agents.pi_runtime import _usable_api_key, llm_api_key_configured
+        self.assertEqual(_usable_api_key("$DEEPSEEK_API_KEY"), "")
+        self.assertEqual(_usable_api_key(""), "")
+        self.assertTrue(_usable_api_key("sk-from-settings"))
+        with (
+            patch.dict("os.environ", {"DEEPSEEK_API_KEY": "", "ANTHROPIC_AUTH_TOKEN": ""}, clear=False),
+            patch("atkbrain.agents.pi_runtime._pi_models_api_key", return_value="sk-from-settings"),
+        ):
             self.assertTrue(llm_api_key_configured())
 
 

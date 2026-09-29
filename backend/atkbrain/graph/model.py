@@ -36,7 +36,7 @@ Relation = Literal["LEADS_TO", "EXPLOITS", "ESCALATES_TO", "PIVOTS_TO", "CONTAIN
 
 Severity = Literal["info", "low", "medium", "high", "critical"]
 IntentStatus = Literal["open", "active", "verified", "disproved", "deferred"]
-VerificationStatus = Literal["pending", "verified", "rejected"]
+VerificationStatus = Literal["pending", "verified", "rejected", "excluded"]
 ProofType = Literal["write_txt", "poc_replay", "impact_extract"]
 
 SEVERITY_ORDER: dict[str, int] = {
@@ -382,6 +382,8 @@ def finding_review_need(
     want_rating: bool,
 ) -> str | None:
     """本条还缺哪份复核：secondary / rating / both；两份都齐或对应开关关则 None。"""
+    if str(_row_get(row, "verification_status") or "").lower() == "excluded":
+        return None
     done_sec = bool(_row_get(row, "secondary_verified"))
     has_rating = bool(normalize_redteam_rating(_row_get(row, "redteam_rating")))
     need_sec = bool(want_secondary) and not done_sec
@@ -399,10 +401,18 @@ def secondary_review_error(
     secondary_verified: bool,
     rating: str | None,
     rationale: str | None,
+    status: str | None = None,
 ) -> str | None:
-    """按本轮意图放行：首次两者都不填；只交二次或只交评级各须理由≥40字；两者都交则三者齐全。"""
+    """按本轮意图放行：首次两者都不填；只交二次或只交评级各须理由≥40字；两者都交则三者齐全。
+    二次没有独立证明时用 excluded 收口，不把 secondary_verified 标成 true。"""
     has_rating = bool(normalize_redteam_rating(rating))
     why = (rationale or "").strip()
+    if str(status or "").lower() == "excluded":
+        if secondary_verified:
+            return "这一条排除时 secondary_verified 必须为 false。排除只表示本条没被二次证明，不是否定这类漏洞。"
+        if len(why) < 40:
+            return "排除须写清二次打了什么、没有看到什么危害，至少 40 字。"
+        return None
     if not secondary_verified and not has_rating and not why:
         return None
     if secondary_verified and has_rating:

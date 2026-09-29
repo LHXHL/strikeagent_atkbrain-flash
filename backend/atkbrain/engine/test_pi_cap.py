@@ -61,7 +61,7 @@ class FanoutAndPoolTests(unittest.TestCase):
     def test_idle_reap_keeps_lead(self) -> None:
         from ..agents.session import ProjectAgent
         src = inspect.getsource(ProjectAgent._reap_idle_workers)
-        self.assertIn('role in ("lead", FINDING_REVIEW_ROLE)', src)
+        self.assertIn("is_review_role(role)", src)
 
     def test_close_does_not_untrack_before_death(self) -> None:
         from ..agents.pi_runtime import PiSession

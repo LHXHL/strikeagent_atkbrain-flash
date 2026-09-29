@@ -66,9 +66,9 @@ class Settings(BaseSettings):
     claude_add_repo_dir: bool = False
 
     loop_max_turns: int = 0           # CTF 不限轮次（含评测）；停猎看墙钟 / 图空转
-    loop_max_turns_src: int = 0       # SRC：不限轮次；停猎看 6 小时墙钟 / 入口不可达 / 空转暂停
+    loop_max_turns_src: int = 0       # SRC：不限轮次；停猎看 12 小时墙钟或手动停止
     loop_max_turns_redteam: int = 0   # 红队：默认不限轮次
-    src_runtime_hard_stop_sec: int = 6 * 60 * 60  # SRC：6 小时墙钟硬停
+    src_runtime_hard_stop_sec: int = 12 * 60 * 60  # SRC：12 小时墙钟硬停
     loop_max_turns_benchmark: int = 0  # 已弃用：评测 CTF 不走轮次硬停
     loop_stall_limit: int = 10
     loop_stall_limit_redteam: int = 10

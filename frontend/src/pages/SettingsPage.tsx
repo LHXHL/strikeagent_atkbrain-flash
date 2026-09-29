@@ -2,6 +2,7 @@ import { useEffect, useState } from "react";
 import { api } from "../api";
 import { useAuth } from "../AuthGate";
 import { LangToggle } from "../components/LangToggle";
+import { Modal } from "../components/Modal";
 import { PasswordChangeForm } from "../components/PasswordChangeForm";
 import { useT } from "../i18n";
 
@@ -24,7 +25,7 @@ const EMPTY_CLOCKS: HuntClocks = {
   loop_max_turns: 0,
   loop_max_turns_src: 0,
   loop_max_turns_redteam: 0,
-  src_runtime_hard_stop_sec: 6 * 3600,
+  src_runtime_hard_stop_sec: 12 * 3600,
   redteam_runtime_hard_stop_sec: 12 * 3600,
   runtime_hard_stop_sec: 40 * 60,
   runtime_hard_stop_pass2_sec: 120 * 60,
@@ -46,10 +47,10 @@ export function SettingsPage() {
   const { t, locale } = useT();
   const { me, refresh } = useAuth();
   const [message, setMessage] = useState("");
+  const [notice, setNotice] = useState<{ ok: boolean; text: string } | null>(null);
   const [custom, setCustom] = useState("");
-  const [backup, setBackup] = useState("");
   const [proxy, setProxy] = useState<any>(null);
-  const [yakit, setYakit] = useState<any>(null);
+  const [piModels, setPiModels] = useState("");
   const [review, setReview] = useState({ secondary_verify: true, redteam_rating: true });
   const [totpUrl, setTotpUrl] = useState("");
   const [totpSecret, setTotpSecret] = useState("");
@@ -59,7 +60,6 @@ export function SettingsPage() {
   const [clockPreview, setClockPreview] = useState<Record<string, { label?: string; conditions?: string[] }>>({});
   useEffect(() => {
     let first = true;
-    let yakitFirst = true;
     const load = () => {
       api.getProxyPool().then((r) => {
         setProxy(r);
@@ -68,15 +68,9 @@ export function SettingsPage() {
           first = false;
         }
       }).catch(() => {});
-      api.yakitStatus().then((r) => {
-        setYakit(r);
-        if (yakitFirst) {
-          setBackup(String(r?.backup_text || ""));
-          yakitFirst = false;
-        }
-      }).catch(() => {});
     };
     load();
+    api.getPiModels().then((r) => setPiModels(String(r?.text || ""))).catch(() => {});
     api.settings().then((r) => {
       const rv = r?.review;
       if (rv && typeof rv.secondary_verify === "boolean" && typeof rv.redteam_rating === "boolean") {
@@ -96,14 +90,31 @@ export function SettingsPage() {
     }).catch(() => {});
   }, [locale]);
 
+  const tell = (ok: boolean, text: string) => {
+    setMessage(text);
+    setNotice({ ok, text });
+  };
+
+  const savePi = async () => {
+    setMessage("");
+    try {
+      const r = await api.savePiModels(piModels);
+      setPiModels(String(r?.text || piModels));
+      window.dispatchEvent(new Event("atkbrain-health"));
+      tell(true, t("settings.piSaved"));
+    } catch (e: any) {
+      tell(false, String(e?.message || e));
+    }
+  };
+
   const savePool = async () => {
     setMessage("");
     try {
       const r = await api.saveProxyPool(custom);
       setProxy(r);
-      setMessage(t("settings.poolSaved"));
+      tell(true, t("settings.poolSaved"));
     } catch (e: any) {
-      setMessage(String(e?.message || e));
+      tell(false, String(e?.message || e));
     }
   };
 
@@ -116,38 +127,6 @@ export function SettingsPage() {
       if (r?.review) setReview(r.review);
     } catch (e: any) {
       setReview(review);
-      setMessage(String(e?.message || e));
-    }
-  };
-
-  const toggleYakit = async () => {
-    setMessage("");
-    try {
-      const r = await api.setYakitEnabled(!yakit?.enabled);
-      setYakit(r);
-    } catch (e: any) {
-      setMessage(String(e?.message || e));
-    }
-  };
-
-  const saveBackup = async () => {
-    setMessage("");
-    try {
-      const r = await api.saveYakitBackup(backup);
-      setYakit(r);
-      setMessage(t("settings.backupSaved"));
-    } catch (e: any) {
-      setMessage(String(e?.message || e));
-    }
-  };
-
-  const downloadCert = async () => {
-    setMessage("");
-    try {
-      const r = await api.downloadYakitCert();
-      setYakit(r);
-      setMessage(t("settings.certSaved"));
-    } catch (e: any) {
       setMessage(String(e?.message || e));
     }
   };
@@ -173,9 +152,9 @@ export function SettingsPage() {
       setSetupId("");
       setTotpCode("");
       await refresh();
-      setMessage(t("settings.totpOk"));
+      tell(true, t("settings.totpOk"));
     } catch (e: any) {
-      setMessage(String(e?.message || e));
+      tell(false, String(e?.message || e));
     }
   };
 
@@ -185,9 +164,9 @@ export function SettingsPage() {
       const r = await api.setHuntClocks(clocks);
       if (r?.hunt_clocks) setClocks({ ...EMPTY_CLOCKS, ...r.hunt_clocks });
       if (r?.hard_stop) setClockPreview(r.hard_stop);
-      setMessage(t("settings.clocksSaved"));
+      tell(true, t("settings.clocksSaved"));
     } catch (e: any) {
-      setMessage(String(e?.message || e));
+      tell(false, String(e?.message || e));
     }
   };
 
@@ -210,6 +189,14 @@ export function SettingsPage() {
         <p>{t("settings.subtitle")}</p>
       </header>
       {message && <p className={/失败|Error|error|already/i.test(message) ? "error-text" : "muted"}>{message}</p>}
+      {notice ? (
+        <Modal title={notice.ok ? t("settings.savedTitle") : t("settings.saveFailedTitle")} onClose={() => setNotice(null)}>
+          <p>{notice.text}</p>
+          <div style={{ marginTop: 18, textAlign: "right" }}>
+            <button className="btn btn-primary" type="button" onClick={() => setNotice(null)}>{t("common.confirm")}</button>
+          </div>
+        </Modal>
+      ) : null}
       <div className="settings-grid">
         <section className="card-cream" style={{ gridColumn: "1 / -1" }}>
           <h3>{t("settings.langCard")}</h3>
@@ -378,60 +365,17 @@ export function SettingsPage() {
           </div>
         </section>
         <section className="card-cream" style={{ gridColumn: "1 / -1" }}>
-          <h3>Yakit</h3>
-          <p className="muted">{t("settings.yakitHint")}</p>
-          <dl className="settings-list">
-            <dt>{t("settings.switch")}</dt>
-            <dd>
-              <button
-                type="button"
-                className={`proxy-switch${yakit?.enabled ? " is-on" : ""}`}
-                aria-pressed={!!yakit?.enabled}
-                onClick={() => { void toggleYakit(); }}
-              >
-                <span className="proxy-switch-knob" />
-              </button>
-              <span style={{ marginLeft: 8 }}>{yakit?.enabled ? t("common.on") : t("common.off")}</span>
-            </dd>
-            <dt>{t("settings.engine")}</dt>
-            <dd>
-              <span className="pulse-dot" style={{ background: yakit?.engine?.ready ? "var(--success)" : "var(--error)", marginRight: 8 }} />
-              {yakit?.engine?.ready ? t("settings.yakitReady") : t("settings.yakitDown")}
-              <span className="mono table-sub" style={{ marginLeft: 8 }}>{yakit?.engine?.url || "-"}</span>
-            </dd>
-            <dt>{t("settings.cert")}</dt>
-            <dd>
-              <span className="pulse-dot" style={{ background: yakit?.cert?.ready ? "var(--success)" : "var(--error)", marginRight: 8 }} />
-              {yakit?.cert?.ready ? t("settings.certReady") : t("settings.certBad")}
-            </dd>
-            <dt>{t("settings.fp")}</dt><dd className="mono" style={{ wordBreak: "break-all" }}>{yakit?.cert?.fingerprint || "-"}</dd>
-            <dt>{t("settings.expires")}</dt><dd className="mono">{yakit?.cert?.expires_at || "-"}</dd>
-            <dt>MITM</dt>
-            <dd className="mono">{yakit?.mitm?.host || "127.0.0.1"}:{yakit?.mitm?.port || 8084} {yakit?.mitm?.listening ? t("settings.listening") : t("settings.notListening")}</dd>
-            <dt>{t("settings.downstream")}</dt><dd className="mono">{yakit?.mitm?.downstream || t("common.empty")}</dd>
-            <dt>{t("settings.verifiedExit")}</dt>
-            <dd className="mono">
-              {yakit?.mitm?.verified ? (yakit?.mitm?.exit_ip || t("settings.verified")) : t("settings.unverified")}
-            </dd>
-            <dt>{t("settings.mcp")}</dt>
-            <dd>{yakit?.tools_count ?? 0}{yakit?.oob_ready ? t("settings.oob") : ""}</dd>
-            {yakit?.engine?.error || yakit?.cert?.error || yakit?.error ? (
-              <>
-                <dt>{t("common.status")}</dt>
-                <dd className="error-text">{yakit?.error || yakit?.engine?.error || yakit?.cert?.error}</dd>
-              </>
-            ) : null}
-          </dl>
+          <h3>{t("settings.piTitle")}</h3>
+          <p className="muted">{t("settings.piHint")}</p>
           <textarea
             className="input"
-            style={{ width: "100%", minHeight: 88, marginTop: 14, fontFamily: "var(--font-mono)", fontSize: 12 }}
-            placeholder={t("settings.backupPh")}
-            value={backup}
-            onChange={(e) => setBackup(e.target.value)}
+            style={{ width: "100%", minHeight: 280, marginTop: 14, fontFamily: "var(--font-mono)", fontSize: 12 }}
+            value={piModels}
+            onChange={(e) => setPiModels(e.target.value)}
+            spellCheck={false}
           />
           <div className="row" style={{ gap: 8, marginTop: 12 }}>
-            <button className="btn btn-primary btn-sm" type="button" onClick={() => { void saveBackup(); }}>{t("settings.saveBackup")}</button>
-            <button className="btn btn-secondary btn-sm" type="button" onClick={() => { void downloadCert(); }}>{t("settings.downloadCert")}</button>
+            <button className="btn btn-primary btn-sm" type="button" onClick={() => { void savePi(); }}>{t("settings.savePi")}</button>
           </div>
         </section>
       </div>

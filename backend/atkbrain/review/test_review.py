@@ -41,6 +41,14 @@ class GateTests(unittest.TestCase):
         from ..graph.model import secondary_review_error
         self.assertIsNotNone(secondary_review_error(False, None, "x" * 50))
 
+    def test_exclude_closes_without_pass(self) -> None:
+        from ..graph.model import secondary_review_error
+        why = "换通道重放后没有再看到同样的文件内容，这一条排除。排除只表示本条没被二次证明，不是否定这类漏洞。"
+        self.assertGreaterEqual(len(why), 40)
+        self.assertIsNone(secondary_review_error(False, None, why, status="excluded"))
+        self.assertIsNotNone(secondary_review_error(True, None, why, status="excluded"))
+        self.assertIsNotNone(secondary_review_error(False, None, "太短", status="excluded"))
+
 
 class NeedTests(unittest.TestCase):
     def test_need_by_flags(self) -> None:
@@ -56,6 +64,18 @@ class NeedTests(unittest.TestCase):
         self.assertEqual(finding_review_need(half, want_secondary=True, want_rating=True), "rating")
         rated = {"secondary_verified": 0, "redteam_rating": "low"}
         self.assertEqual(finding_review_need(rated, want_secondary=True, want_rating=True), "secondary")
+        excluded = {"secondary_verified": 0, "redteam_rating": None, "verification_status": "excluded"}
+        self.assertIsNone(finding_review_need(excluded, want_secondary=True, want_rating=True))
+
+    def test_attempt_cap_keeps_the_rest_of_the_queue(self) -> None:
+        from ..review.jobs import note_review_attempt, review_attempt_open
+        book: dict[tuple[str, str], int] = {}
+        self.assertTrue(review_attempt_open(book, "f1", "secondary"))
+        for _ in range(3):
+            note_review_attempt(book, "f1", "secondary")
+        self.assertFalse(review_attempt_open(book, "f1", "secondary"))
+        self.assertTrue(review_attempt_open(book, "f2", "secondary"))
+        self.assertTrue(review_attempt_open(book, "f1", "rating"))
 
 
 class FlagTests(unittest.TestCase):
@@ -163,6 +183,30 @@ class JobBusyTests(unittest.TestCase):
         with self.assertRaises(jobs.ReviewBusy):
             jobs.claim("p", "f", "both")
         jobs.claim("p", "f", "rating")
+        jobs._JOBS.clear()
+        jobs._ACTIVE.clear()
+
+    def test_queued_is_not_running(self) -> None:
+        from ..review import jobs
+        jobs._JOBS.clear()
+        jobs._ACTIVE.clear()
+        jobs.claim("p", "f1", "secondary")
+        state = jobs.review_state("p", "f1")
+        self.assertEqual(state["secondary"]["status"], "queued")
+        self.assertNotIn("secondary", jobs.reviewing_modes("p", "f1"))
+        jid = jobs._ACTIVE[("p", "f1", "secondary")]
+        jobs.mark_running(jid, "已拉起 Pi，等待模型")
+        self.assertEqual(jobs.review_state("p", "f1")["secondary"]["status"], "running")
+        self.assertIn("secondary", jobs.reviewing_modes("p", "f1"))
+        jobs.note_review_beat(jid, "正在调用 http_request")
+        jobs.pulse_review(jid)
+        self.assertEqual(jobs._JOBS[jid]["detail"], "正在调用 http_request")
+        jobs._JOBS[jid]["detail"] = "等待模型回复"
+        jobs.pulse_review(jid)
+        self.assertEqual(jobs._JOBS[jid]["detail"], "等待模型回复")
+        jobs.claim("p", "f1", "rating")
+        self.assertEqual(jobs.review_state("p", "f1")["rating"]["status"], "queued")
+        self.assertNotIn("rating", jobs.reviewing_modes("p", "f1"))
         jobs._JOBS.clear()
         jobs._ACTIVE.clear()
 

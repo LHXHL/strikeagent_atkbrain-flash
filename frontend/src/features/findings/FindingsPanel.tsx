@@ -64,46 +64,66 @@ export type FindingReviewState = {
   titles: string[];
 };
 
+function findingNeedsReview(f: Finding): boolean {
+  if ((f.verification_status || "").toLowerCase() === "excluded") return false;
+  if (isNodeOnlyVuln(f)) return false;
+  return !f.secondary_verified || !String(f.redteam_rating || "").trim();
+}
+
+/** 事件里的名单会比写库晚。已经二次验证并有红队评级的，不再算进「正在」。 */
+export function liveReviewQueue(review: FindingReviewState, findings: Finding[]): Finding[] {
+  if (!review.running || !findings.length) return [];
+  const pending = findings.filter(findingNeedsReview);
+  if (!review.ids.length) return pending;
+  const ids = new Set(review.ids.map(String));
+  return pending.filter((f) => ids.has(String(f.id || "")));
+}
+
 export function latestFindingReview(events: RTEvent[]): FindingReviewState {
   let running = false;
   let count = 0;
   let ids: string[] = [];
   let titles: string[] = [];
   for (const ev of events) {
+    if (ev.type !== "finding_review") continue;
     const p = ev.payload || {};
-    if (ev.type === "finding_review") {
-      running = String(p.status || "") === "running";
+    running = String(p.status || "") === "running";
+    if (running) {
       count = Number(p.count || 0) || count;
       if (Array.isArray(p.ids)) ids = p.ids.map(String).filter(Boolean);
       if (Array.isArray(p.titles)) titles = p.titles.map(String).filter(Boolean);
-      continue;
-    }
-    if (String(p.role || "") === "finding-review") {
-      running = true;
-      continue;
-    }
-    const msg = String(p.message || "");
-    if (ev.type === "log" && msg.includes("专职二次验证")) {
-      const m = msg.match(/专职二次验证\s*(\d+)/);
-      if (m) count = Number(m[1]) || count;
-      running = true;
+    } else {
+      count = 0;
+      ids = [];
+      titles = [];
     }
   }
   return { running, count, ids, titles };
 }
 
-export function FindingReviewBanner({ review }: { review: FindingReviewState }) {
+export function reviewIsLive(review: FindingReviewState, findings: Finding[] = []): boolean {
+  if (!review.running) return false;
+  if (!findings.length) return review.ids.length > 0 || review.titles.length > 0 || review.count > 0;
+  return liveReviewQueue(review, findings).length > 0;
+}
+
+export function FindingReviewBanner({ review, findings = [] }: { review: FindingReviewState; findings?: Finding[] }) {
   const { t } = useT();
-  if (!review.running) return null;
+  if (!reviewIsLive(review, findings)) return null;
+  const open = liveReviewQueue(review, findings);
+  const titles = open.length
+    ? open.map((f) => String(f.title || "")).filter(Boolean)
+    : review.titles;
+  const n = open.length || review.count || titles.length;
   return (
     <div className="finding-review-banner" role="status">
       <span className="finding-review-dot" />
       <div>
         <b>{t("findings.reviewing")}</b>
-        <span className="muted">{t("findings.reviewN", { n: review.count || review.titles.length })}</span>
-        {review.titles.length > 0 && (
+        <span className="muted">{t("findings.reviewN", { n })}</span>
+        {titles.length > 0 && (
           <ul className="finding-review-titles">
-            {review.titles.slice(0, 6).map((title) => (
+            {titles.slice(0, 6).map((title) => (
               <li key={title}>{title}</li>
             ))}
           </ul>
@@ -126,13 +146,15 @@ export function FindingsPanel({
   const { t } = useT();
   const [selected, setSelected] = useState<Finding | null>(null);
   const visible = useMemo(() => collectVulns(findings, nodes, { src }), [findings, nodes, src]);
-  const reviewingIds = new Set(review?.running ? review.ids : []);
-  const reviewingAll = !!review?.running && reviewingIds.size === 0;
+  const reviewingIds = useMemo(() => {
+    if (!review) return new Set<string>();
+    return new Set(liveReviewQueue(review, visible).map((f) => String(f.id || "")));
+  }, [review, visible]);
 
   if (!visible.length) {
     return (
       <>
-        {review ? <FindingReviewBanner review={review} /> : null}
+        {review ? <FindingReviewBanner review={review} findings={visible} /> : null}
         <p className="muted" style={{ fontSize: 14 }}>
           {t("findings.empty")}
         </p>
@@ -151,10 +173,22 @@ export function FindingsPanel({
 
   return (
     <>
-      {review ? <FindingReviewBanner review={review} /> : null}
+      {review ? <FindingReviewBanner review={review} findings={visible} /> : null}
       <div className="scroll-y" style={{ maxHeight: 520 }}>
         {visible.map((f) => {
-          const reviewing = !f.secondary_verified && (reviewingAll || reviewingIds.has(String(f.id || "")));
+          const excluded = (f.verification_status || "").toLowerCase() === "excluded";
+          const inQueue = !excluded && !isNodeOnlyVuln(f);
+          const needSec = inQueue && !f.secondary_verified;
+          const needRate = inQueue && !String(f.redteam_rating || "").trim();
+          const inReview = reviewingIds.has(String(f.id || ""));
+          const secReviewing = needSec && inReview;
+          const rateReviewing = needRate && inReview;
+          const reviewing = secReviewing || rateReviewing;
+          const reviewTip = secReviewing && rateReviewing
+            ? t("findings.reviewTip")
+            : secReviewing
+              ? t("findings.reviewTipSec")
+              : t("findings.reviewTipRate");
           return (
             <div
               key={f.id}
@@ -166,8 +200,12 @@ export function FindingsPanel({
                 <div className="row" style={{ gap: 8, flexWrap: "wrap" }}>
                   <SeverityBadge severity={displayFindingSeverity(f)} />
                   <VerifyBadge status={f.verification_status} />
-                  <SecondaryVerifyBadge done={!!f.secondary_verified} reviewing={reviewing} />
-                  <RedteamRatingBadge rating={f.redteam_rating} reviewing={reviewing} />
+                  {!excluded && (
+                    <SecondaryVerifyBadge done={!!f.secondary_verified} reviewing={secReviewing} />
+                  )}
+                  {!excluded && (
+                    <RedteamRatingBadge rating={f.redteam_rating} reviewing={rateReviewing} />
+                  )}
                   <b style={{ fontSize: 14 }}>{scrubCandidateRceLabel(f.title) || f.title}</b>
                 </div>
                 <span className="muted" style={{ fontSize: 12 }}>{f.category}</span>
@@ -176,7 +214,7 @@ export function FindingsPanel({
                 {isNodeOnlyVuln(f)
                   ? t("findings.nodeTip")
                   : reviewing
-                    ? t("findings.reviewTip")
+                    ? reviewTip
                     : t("findings.openTip")}
               </p>
             </div>

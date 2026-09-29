@@ -96,6 +96,7 @@ async def create_single_project(
         h, _p = _clean_target(str(raw or ""))
         if not h or h in seen_t:
             continue
+        assert_safe_project_target(h)
         seen_t.add(h)
         extra.append(h)
     all_targets = [host, *extra]

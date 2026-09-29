@@ -1,0 +1,14 @@
+# macOS Docker Desktop：Caddy 与后端不在同一网络命名空间，反代服务名而不是 127.0.0.1。
+{
+	auto_https off
+}
+
+:2334 {
+	tls /etc/caddy/certs/cert.pem /etc/caddy/certs/key.pem
+	encode gzip
+	reverse_proxy atkbrain:2333 {
+		header_up X-Forwarded-Proto https
+		header_up Host {http.request.hostport}
+		flush_interval -1
+	}
+}

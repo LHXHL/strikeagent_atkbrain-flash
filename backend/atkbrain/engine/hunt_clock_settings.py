@@ -66,7 +66,7 @@ def defaults() -> dict[str, int]:
         "loop_max_turns": 0,
         "loop_max_turns_src": 0,
         "loop_max_turns_redteam": 0,
-        "src_runtime_hard_stop_sec": 6 * 60 * 60,
+        "src_runtime_hard_stop_sec": 12 * 60 * 60,
         "redteam_runtime_hard_stop_sec": 12 * 60 * 60,
         "runtime_hard_stop_sec": 40 * 60,
         "runtime_hard_stop_pass2_sec": 120 * 60,

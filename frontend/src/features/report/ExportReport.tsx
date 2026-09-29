@@ -1,7 +1,7 @@
 import { useEffect, useRef, useState } from "react";
 import { api } from "../../api";
 import { Modal } from "../../components/Modal";
-import { useT, type Locale } from "../../i18n";
+import { useT } from "../../i18n";
 
 export type ReportExportJob = {
   id: string;
@@ -50,11 +50,8 @@ export function ReportExportControls({
   const [open, setOpen] = useState(false);
   const [job, setJob] = useState<ReportExportJob | null>(null);
   const [err, setErr] = useState("");
-  const [lang, setLang] = useState<Locale>(locale);
   const poll = useRef<ReturnType<typeof setInterval> | null>(null);
   const wrapRef = useRef<HTMLDivElement>(null);
-
-  useEffect(() => { setLang(locale); }, [locale]);
 
   const stopPoll = () => {
     if (poll.current) {
@@ -87,7 +84,7 @@ export function ReportExportControls({
       message: t("report.queued"),
     });
     try {
-      const j = await api.startReportExport(projectId, fmt, lang);
+      const j = await api.startReportExport(projectId, fmt, locale);
       setJob(j);
       stopPoll();
       let misses = 0;
@@ -160,23 +157,6 @@ export function ReportExportControls({
         </button>
         {menu && (
           <div className="report-export-menu" role="menu">
-            <div className="row" style={{ gap: 6, padding: "6px 10px", alignItems: "center" }}>
-              <span className="muted" style={{ fontSize: 12 }}>{t("report.lang")}</span>
-              <button
-                type="button"
-                className={lang === "zh" ? "btn btn-primary btn-sm" : "btn btn-secondary btn-sm"}
-                onClick={(e) => { e.stopPropagation(); setLang("zh"); }}
-              >
-                {t("common.langZh")}
-              </button>
-              <button
-                type="button"
-                className={lang === "en" ? "btn btn-primary btn-sm" : "btn btn-secondary btn-sm"}
-                onClick={(e) => { e.stopPropagation(); setLang("en"); }}
-              >
-                {t("common.langEn")}
-              </button>
-            </div>
             <button type="button" role="menuitem" onClick={() => start("html")}>{t("report.html")}</button>
             <button type="button" role="menuitem" onClick={() => start("pdf")}>{t("report.pdf")}</button>
           </div>

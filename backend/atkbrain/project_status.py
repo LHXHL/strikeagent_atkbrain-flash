@@ -4,17 +4,15 @@ CTF（含评测子题）：不限轮次、不做御主运行时审查。
 墙钟硬停按遍次：第 1 遍 40 分钟，第 2 遍 120 分钟，第 3 遍 180 分钟，之后每次 +60。
 图空转：连续 6 个御主方案仍无新节点、无交旗、也无本地长计算 → 失败。
 评测覆盖期按第 1 遍墙钟让槽，全部开过一轮后再回头啃未出/未齐 flag。
-SRC：6 小时墙钟硬停，记失败；不限轮次；已验证高危/严重不停工。
-连续 10 轮无高质量进展 → 暂停可再开（不算失败）。入口连不上不暂停。
-红队：12 小时墙钟硬停，记失败；拿到 shell 提前收工。不走轮次 / 图空转。
-红队升到第 3 圈后才允许空转暂停。
-人工暂停、入口不可达仍是 idle。
+SRC / 红队：墙钟、连续 30 轮无新节点且无新漏洞、或手动停止。拿到 shell 仍提前收工。
+入口不可达、会话故障、轮次上限都不停。
 """
 from __future__ import annotations
 
 HUNT_FAILED_REASONS = frozenset({
-    "graph_idle", "runtime_cap", "turn_cap",
+    "graph_idle", "runtime_cap", "turn_cap", "empty_rounds",
 })
+EMPTY_ROUND_STOP = 30
 
 
 def uses_ctf_hunt_clocks(objective: str | None = None) -> bool:
@@ -65,16 +63,16 @@ def ctf_pass_index(*, ended_real_attempts: int = 0) -> int:
 
 
 def hunt_runtime_hard_stop_sec(objective: str | None = None, *, pass_n: int | None = None) -> int:
-    """本猎墙钟硬上限（秒）。CTF 按遍次；SRC 6 小时；红队 12 小时；0 表示不限。"""
+    """本猎墙钟硬上限（秒）。CTF 按遍次；SRC / 红队 12 小时；0 表示不限。"""
     from .config import settings
     from .objective import objective_is_src
     if uses_ctf_hunt_clocks(objective):
         return ctf_pass_hard_stop_sec(pass_n)
     if objective_is_src(objective):
         try:
-            return max(0, int(getattr(settings, "src_runtime_hard_stop_sec", 6 * 60 * 60) or 0))
+            return max(0, int(getattr(settings, "src_runtime_hard_stop_sec", 12 * 60 * 60) or 0))
         except (TypeError, ValueError):
-            return 6 * 60 * 60
+            return 12 * 60 * 60
     try:
         return max(0, int(getattr(settings, "redteam_runtime_hard_stop_sec", 12 * 60 * 60) or 0))
     except (TypeError, ValueError):
@@ -130,25 +128,16 @@ def hunt_hard_stop_info(objective: str | None = None, *, pass_n: int | None = No
     turns = hunt_max_turns(objective)
     cap = format_duration(runtime, loc)
     hang = format_duration(_setting_int("turn_hang_sec", 8 * 60), loc)
-    entry_sec = _setting_int("redteam_entry_down_yield_sec", 0)
     ctf_entry_sec = _setting_int("benchmark_entry_down_yield_sec", 8 * 60)
-    stall_n = _setting_int("loop_stall_limit_redteam", _setting_int("loop_stall_limit", 10))
-    src_stall = _setting_int("loop_stall_limit_src", stall_n)
     o = normalize_objective(objective)
     retry = msg("hs.retry", loc, hang=hang)
     if o == SRC:
         conditions = [
             msg("hs.wall_fail", loc, cap=cap),
-            msg("hs.src_stall", loc, n=src_stall),
-            retry,
+            msg("hs.empty_rounds", loc, n=EMPTY_ROUND_STOP),
+            msg("hs.manual", loc),
         ]
-        if entry_sec > 0:
-            conditions.insert(1, msg("hs.entry_down", loc, dur=format_duration(entry_sec, loc)))
-        if turns > 0:
-            conditions.insert(1, msg("hs.turns_fail", loc, turns=turns))
-            label = msg("hs.src_label_turns", loc, turns=turns, cap=cap)
-        else:
-            label = msg("hs.src_label", loc, cap=cap)
+        label = msg("hs.src_label", loc, cap=cap, n=EMPTY_ROUND_STOP)
     elif o == FLAG:
         idle_n = max(1, _setting_int("graph_idle_empty_plans", 6) or 6)
         conditions = [
@@ -163,12 +152,10 @@ def hunt_hard_stop_info(objective: str | None = None, *, pass_n: int | None = No
     else:
         conditions = [
             msg("hs.wall_fail", loc, cap=cap),
-            msg("hs.red_stall", loc, n=stall_n),
-            retry,
+            msg("hs.empty_rounds", loc, n=EMPTY_ROUND_STOP),
+            msg("hs.manual", loc),
         ]
-        if entry_sec > 0:
-            conditions.insert(1, msg("hs.entry_down", loc, dur=format_duration(entry_sec, loc)))
-        label = msg("hs.red_label", loc, cap=cap)
+        label = msg("hs.red_label", loc, cap=cap, n=EMPTY_ROUND_STOP)
     return {
         "track": o,
         "runtime_sec": runtime,

@@ -77,8 +77,7 @@ async def run_shell(
     env = None
     if extra_env or project_id:
         from ..objective import objective_allows_flag
-        via_yakit = str((extra_env or {}).get("ATKBRAIN_YAKIT_MITM") or "") == "1"
-        if extra_env and objective_allows_flag(getattr(guard, "objective", None)) and not via_yakit:
+        if extra_env and objective_allows_flag(getattr(guard, "objective", None)):
             extra_env = None
     if extra_env or project_id:
         env = os.environ.copy()
@@ -86,9 +85,8 @@ async def run_shell(
             env.update(extra_env)
         if project_id:
             env["ATKBRAIN_PROJECT_ID"] = str(project_id)
-        via_yakit = str((extra_env or {}).get("ATKBRAIN_YAKIT_MITM") or "") == "1"
         try:
-            if extra_env and not via_yakit:
+            if extra_env:
                 from ..proxy.enforce import proxy_url_from_env, wrap_proxychains
                 from ..proxy.pool import pool as _proxy_pool
                 chain = _proxy_pool.pick_chain(8)

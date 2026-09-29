@@ -225,12 +225,9 @@ export const api = {
   saveProxyPool: (custom_text: string) =>
     req<any>("/api/proxy/pool", { method: "POST", headers: J, body: JSON.stringify({ custom_text }) }),
   verifyProxy: () => req<any>("/api/proxy/verify", { method: "POST" }),
-  yakitStatus: () => req<any>("/api/yakit/status"),
-  setYakitEnabled: (enabled: boolean) =>
-    req<any>("/api/yakit/enabled", { method: "POST", headers: J, body: JSON.stringify({ enabled }) }),
-  saveYakitBackup: (backup_text: string) =>
-    req<any>("/api/yakit/backup", { method: "POST", headers: J, body: JSON.stringify({ backup_text }) }),
-  downloadYakitCert: () => req<any>("/api/yakit/cert", { method: "POST" }),
+  getPiModels: () => req<{ text: string }>("/api/settings/pi-models"),
+  savePiModels: (text: string) =>
+    req<{ ok: boolean; text: string }>("/api/settings/pi-models", { method: "POST", headers: J, body: JSON.stringify({ text }) }),
 
   listProjects: () => req<Project[]>("/api/projects"),
   getProject: (id: string) => req<Project>(`/api/projects/${id}`),

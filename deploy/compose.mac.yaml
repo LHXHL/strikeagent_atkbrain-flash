@@ -1,0 +1,18 @@
+# macOS Docker Desktop 没有可用的 host 网络。两端都进项目桥接网，只把控制台绑到本机。
+#   docker compose -f compose.yaml -f deploy/compose.build.yaml -f deploy/compose.mac.yaml up -d --build --wait
+
+services:
+  atkbrain:
+    network_mode: !reset null
+    ports: !override
+      - "127.0.0.1:2333:2333"
+
+  caddy:
+    network_mode: !reset null
+    ports: !override
+      - "127.0.0.1:2334:2334"
+    volumes: !override
+      - ./deploy/Caddyfile.mac:/etc/caddy/Caddyfile:ro
+      - ./backend/data/tls:/etc/caddy/certs:ro
+      - caddy_data:/data
+      - caddy_config:/config

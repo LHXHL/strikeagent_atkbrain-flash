@@ -98,43 +98,60 @@ def _verify_label(st: str | None, lang: str | None = None) -> str:
     return extra.get(loc, extra["zh"]).get(s) or lab("intel", loc) or s
 
 
+def _page_state(finding: dict) -> str:
+    """pending：二次还没完成，猎手写过的五段也不当正式页。
+    writing：二次已完成，五段还没落库。
+    ready：二次已完成且五段齐全。二次开关关掉时，有五段即 ready。
+    """
+    from .pi_finding_page import has_pi_page
+    from ..review.flags import get_review_flags
+
+    need_sec = bool(get_review_flags().get("secondary_verify", True))
+    sec = bool(finding.get("secondary_verified"))
+    if need_sec and not sec:
+        return "pending"
+    if has_pi_page(finding):
+        return "ready"
+    return "writing"
+
+
 def prepare_finding_report(finding: dict, *, poc: dict | None = None) -> dict:
-    """把专职 Pi 写的五板块铺到弹层字段；没有则标 pending，不用类别模板填空。"""
-    from .pi_finding_page import PENDING_COPY, has_pi_page
-    from ..graph.model import redteam_rating_block, redteam_rating_label
+    """弹层只在二次完成且五段落库后展示正文。有评级或猎手草稿不算页已写好。"""
+    from .pi_finding_page import PENDING_COPY, WRITING_COPY
 
     out = dict(finding)
     _ = poc
+    state = _page_state(out)
+    out["report_state"] = state
+    out["report_pending"] = state != "ready"
+    if state != "ready":
+        note = WRITING_COPY if state == "writing" else PENDING_COPY
+        out["impact_detail"] = note
+        out["impact"] = note
+        out["secondary_review"] = note
+        out["manual_repro"] = note
+        out["manual_steps"] = []
+        out["remediation"] = note
+        return out
     summary = (out.get("report_summary") or "").strip()
     impact = (out.get("report_impact") or "").strip()
     rating = (out.get("report_rating") or "").strip()
     repro = (out.get("report_repro") or "").strip()
     fix = (out.get("report_fix") or "").strip()
-    pending = not has_pi_page(out)
-    out["report_pending"] = pending
     if summary:
         out["description"] = summary
     if impact:
         out["impact_detail"] = impact
         out["impact"] = impact
-    elif pending:
-        out["impact_detail"] = PENDING_COPY
-        out["impact"] = PENDING_COPY
     if rating:
         out["secondary_review"] = rating
-    elif not pending:
-        out["secondary_review"] = redteam_rating_block(out)
-    else:
-        rt = redteam_rating_label(out.get("redteam_rating"))
-        why = (out.get("redteam_rating_rationale") or "").strip()
-        out["secondary_review"] = why or (PENDING_COPY if rt == "未评级" else f"级别：{rt}。正文待专职 Pi 撰写。")
     if repro:
         out["manual_repro"] = repro
         out["manual_steps"] = [ln.strip() for ln in repro.splitlines() if ln.strip()]
     else:
-        out["manual_repro"] = PENDING_COPY if pending else ""
+        out["manual_repro"] = ""
         out["manual_steps"] = []
-    out["remediation"] = fix or (PENDING_COPY if pending else "")
+    out["remediation"] = fix
     return out
 
 
@@ -199,34 +216,51 @@ def render_finding_markdown(
         f"{h2} {heads['summary']}",
         "",
     ]
-    lines += _md_block(finding.get("description") or finding.get("title"), heads["empty"])
-    lines += [f"{h2} {heads['impact']}", ""]
-    lines += _md_block(finding.get("impact_detail") or finding.get("impact"), heads["empty"])
-    lines += [f"{h2} {heads['rating']}", ""]
-    lines += _md_block(finding.get("secondary_review") or redteam_rating_block(finding), heads["empty"])
-    lines += [f"{h2} {heads['repro']}", ""]
-    repro = (finding.get("manual_repro") or "").strip()
-    if repro:
-        lines += _md_block(repro, heads["empty"])
+    ready = finding.get("report_state") == "ready"
+    note = (finding.get("impact_detail") or "").strip()
+    if ready:
+        lines += _md_block(finding.get("description") or finding.get("title"), heads["empty"])
     else:
-        for s in finding.get("manual_steps") or []:
-            lines.append(s)
-        if not finding.get("manual_steps"):
-            lines += _md_block("", heads["empty"])
-    curl = real_poc_text(poc.get("curl") or finding.get("poc_curl"))
-    py = real_poc_text(poc.get("python") or finding.get("poc_python"))
-    raw_curl = (poc.get("curl") or finding.get("poc_curl") or "").strip()
-    raw_py = (poc.get("python") or finding.get("poc_python") or "").strip()
-    if curl:
-        lines += ["```bash", curl, "```", ""]
-    if py:
-        lines += ["```python", py, "```", ""]
-    if not curl and not py:
-        lines += [heads["no_poc"], ""]
-        if raw_curl or raw_py:
-            lines.append(heads["no_synth"])
+        lines += _md_block(note, heads["empty"])
+    lines += [f"{h2} {heads['impact']}", ""]
+    if ready:
+        lines += _md_block(finding.get("impact_detail") or finding.get("impact"), heads["empty"])
+    else:
+        lines += _md_block(note, heads["empty"])
+    lines += [f"{h2} {heads['rating']}", ""]
+    if ready:
+        lines += _md_block(finding.get("secondary_review") or redteam_rating_block(finding), heads["empty"])
+    else:
+        lines += _md_block(note, heads["empty"])
+    lines += [f"{h2} {heads['repro']}", ""]
+    if ready:
+        repro = (finding.get("manual_repro") or "").strip()
+        if repro:
+            lines += _md_block(repro, heads["empty"])
+        else:
+            for s in finding.get("manual_steps") or []:
+                lines.append(s)
+            if not finding.get("manual_steps"):
+                lines += _md_block("", heads["empty"])
+        curl = real_poc_text(poc.get("curl") or finding.get("poc_curl"))
+        py = real_poc_text(poc.get("python") or finding.get("poc_python"))
+        raw_curl = (poc.get("curl") or finding.get("poc_curl") or "").strip()
+        raw_py = (poc.get("python") or finding.get("poc_python") or "").strip()
+        if curl:
+            lines += ["```bash", curl, "```", ""]
+        if py:
+            lines += ["```python", py, "```", ""]
+        if not curl and not py:
+            lines += [heads["no_poc"], ""]
+            if raw_curl or raw_py:
+                lines.append(heads["no_synth"])
+    else:
+        lines += _md_block(note, heads["empty"])
     lines += [f"{h2} {heads['fix']}", ""]
-    lines += _md_block(finding.get("remediation") or finding.get("report_fix"), heads["empty"])
+    if ready:
+        lines += _md_block(finding.get("remediation") or finding.get("report_fix"), heads["empty"])
+    else:
+        lines += _md_block(note, heads["empty"])
     return "\n".join(lines)
 
 
